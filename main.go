@@ -20,6 +20,8 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"syscall"
 
@@ -37,6 +39,12 @@ type envConfig struct {
 	StateDir   string
 }
 
+// validHostname matches a Tailscale hostname: lowercase alphanumeric and
+// hyphens, no leading/trailing hyphen, 1-63 characters (DNS label rules).
+// This also guarantees the value is a safe single path element, since the
+// hostname is used to construct the temp state directory path.
+var validHostname = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
 // parseEnvConfig reads and validates ts4nsnet configuration from environment
 // variables. Returns an error if required variables are missing.
 func parseEnvConfig() (envConfig, error) {
@@ -52,6 +60,9 @@ func parseEnvConfig() (envConfig, error) {
 	}
 	if c.Hostname == "" {
 		return c, fmt.Errorf("TS_HOSTNAME environment variable is required")
+	}
+	if !validHostname.MatchString(c.Hostname) {
+		return c, fmt.Errorf("TS_HOSTNAME %q is not a valid hostname (lowercase alphanumeric and hyphens, 1-63 chars)", c.Hostname)
 	}
 	return c, nil
 }
@@ -178,16 +189,18 @@ func run() error {
 	}
 
 	// Set up a state directory for tsnet. If TS_STATE_DIR is set, use it
-	// directly. Otherwise create a per-instance temp directory that is
-	// cleaned up on shutdown to avoid host persistence and collisions
-	// between concurrent containers.
+	// directly. Otherwise use a hostname-keyed directory under os.TempDir.
+	// Using the hostname makes the path stable across container restarts
+	// (so state doesn't accumulate) and unique across concurrent instances
+	// (each container has a distinct tailnet hostname). The directory is
+	// cleaned up on shutdown; if a previous instance was killed abruptly,
+	// the surviving directory is simply reused on next start.
 	stateDir := cfg.StateDir
 	if stateDir == "" {
-		d, err := os.MkdirTemp("", "ts4nsnet-*")
-		if err != nil {
+		stateDir = filepath.Join(os.TempDir(), "ts4nsnet-"+cfg.Hostname)
+		if err := os.MkdirAll(stateDir, 0700); err != nil {
 			return fmt.Errorf("creating state directory: %v", err)
 		}
-		stateDir = d
 		defer os.RemoveAll(stateDir)
 	}
 

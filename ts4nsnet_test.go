@@ -113,6 +113,42 @@ func TestParseEnvConfig(t *testing.T) {
 	if cfg.StateDir != "" {
 		t.Errorf("StateDir = %q, want empty", cfg.StateDir)
 	}
+
+	// Invalid hostnames.
+	for _, bad := range []string{
+		"../etc/passwd",
+		"-leading-hyphen",
+		"trailing-hyphen-",
+		"has spaces",
+		"UPPERCASE",
+		"has.dots",
+		"has/slash",
+		"",
+	} {
+		t.Setenv("TS_HOSTNAME", bad)
+		if bad == "" {
+			// Empty hostname is caught by the earlier check.
+			continue
+		}
+		_, err = parseEnvConfig()
+		if err == nil {
+			t.Errorf("expected error for hostname %q, got nil", bad)
+		}
+	}
+
+	// Valid hostnames.
+	for _, good := range []string{
+		"a",
+		"myhost",
+		"my-container-1",
+		"x" + string(make([]byte, 0)), // single char
+	} {
+		t.Setenv("TS_HOSTNAME", good)
+		_, err = parseEnvConfig()
+		if err != nil {
+			t.Errorf("unexpected error for hostname %q: %v", good, err)
+		}
+	}
 }
 
 func TestValidateMTU(t *testing.T) {
