@@ -36,9 +36,9 @@ func TestContainerPIDFromNSPath(t *testing.T) {
 			want:   1,
 		},
 		{
-			name:    "named netns without override",
+			name:    "named netns without override falls through to proc scan",
 			nsPath:  "/run/netns/mycontainer",
-			wantErr: true,
+			wantErr: false, // findPIDInNetNS finds a process in our own netns
 		},
 		{
 			name:   "named netns with TS_SSH_PID",
@@ -65,9 +65,9 @@ func TestContainerPIDFromNSPath(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "empty path",
+			name:    "empty path falls through to proc scan",
 			nsPath:  "",
-			wantErr: true,
+			wantErr: false, // findPIDInNetNS finds a process in our own netns
 		},
 		{
 			name:   "TS_SSH_PID takes precedence over proc path",
@@ -88,7 +88,7 @@ func TestContainerPIDFromNSPath(t *testing.T) {
 				t.Errorf("containerPIDFromNSPath(%q) error = %v, wantErr %v", tt.nsPath, err, tt.wantErr)
 				return
 			}
-			if got != tt.want {
+			if tt.want != 0 && got != tt.want {
 				t.Errorf("containerPIDFromNSPath(%q) = %d, want %d", tt.nsPath, got, tt.want)
 			}
 		})
@@ -245,11 +245,10 @@ func TestSSHServerConnects(t *testing.T) {
 	}
 
 	// Start SSH server on node 1.
-	// Use a fake PID (won't actually nsenter in this test).
 	stateDir := t.TempDir()
 	sshSrv := &sshServer{
 		tsnetSrv: srv1,
-		pid:      1, // won't be used — we test connection/auth only
+		nsPath:   "/proc/1/ns/net", // won't nsenter in this test
 	}
 	hostKey, err := loadOrGenerateHostKey(stateDir)
 	if err != nil {

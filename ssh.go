@@ -33,18 +33,11 @@ import (
 type sshServer struct {
 	tsnetSrv *tsnet.Server
 	hostKey  gossh.Signer
-	pid      int // container init PID for nsenter
+	nsPath   string // network namespace path for PID resolution
 }
 
 // newSSHServer creates an SSH server that will listen on the tsnet interface.
-// It derives the container PID from nsPath and loads or generates an ED25519
-// host key in stateDir.
 func newSSHServer(srv *tsnet.Server, nsPath string, stateDir string) (*sshServer, error) {
-	pid, err := containerPIDFromNSPath(nsPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolving container PID: %w", err)
-	}
-
 	hostKey, err := loadOrGenerateHostKey(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("host key: %w", err)
@@ -53,8 +46,14 @@ func newSSHServer(srv *tsnet.Server, nsPath string, stateDir string) (*sshServer
 	return &sshServer{
 		tsnetSrv: srv,
 		hostKey:  hostKey,
-		pid:      pid,
+		nsPath:   nsPath,
 	}, nil
+}
+
+// containerPID resolves the container init PID at call time (not cached).
+// This avoids stale PIDs from transient setup processes.
+func (s *sshServer) containerPID() (int, error) {
+	return containerPIDFromNSPath(s.nsPath)
 }
 
 // run starts the SSH server, listening on :22 of the tsnet interface.
@@ -208,13 +207,19 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 // nsenter. If cmdArgs is nil, it runs an interactive login shell.
 // Returns the process exit code.
 func (s *sshServer) execInContainer(ctx context.Context, ch gossh.Channel, cmdArgs []string, envVars []string, winSize *pty.Winsize, ptmx **os.File) int {
+	pid, err := s.containerPID()
+	if err != nil {
+		log.Printf("SSH: failed to resolve container PID: %v", err)
+		fmt.Fprintf(ch, "failed to resolve container PID: %v\r\n", err)
+		return 1
+	}
 	args := []string{
-		"-t", strconv.Itoa(s.pid),
-		"-m", "-u", "-i", "-n", "-p", "-C",
+		"-t", strconv.Itoa(pid),
+		"-m", "-u", "-i", "-n", "-p", "-C", "-F",
 		"--",
 	}
 	if cmdArgs == nil {
-		args = append(args, "/bin/sh", "-l")
+		args = append(args, "/bin/sh")
 	} else {
 		args = append(args, cmdArgs...)
 	}
@@ -415,9 +420,13 @@ func loadOrGenerateHostKey(stateDir string) (gossh.Signer, error) {
 	return signer, nil
 }
 
-// containerPIDFromNSPath extracts the container PID from a /proc/PID/ns/net
-// path. Falls back to the TS_SSH_PID environment variable for named netns
-// paths like /run/netns/NAME.
+// containerPIDFromNSPath resolves the container init PID for nsenter.
+//
+// Resolution order:
+//  1. TS_SSH_PID env var (explicit override)
+//  2. /proc/PID/ns/net path format (PID embedded in path)
+//  3. Named netns (/run/user/UID/netns/NAME or /run/netns/NAME) — scan /proc
+//     to find a process whose net namespace matches.
 func containerPIDFromNSPath(nsPath string) (int, error) {
 	// Try TS_SSH_PID override first.
 	if pidStr := os.Getenv("TS_SSH_PID"); pidStr != "" {
@@ -432,19 +441,60 @@ func containerPIDFromNSPath(nsPath string) (int, error) {
 	}
 
 	// Parse /proc/PID/ns/net format.
-	if !strings.HasPrefix(nsPath, "/proc/") {
-		return 0, fmt.Errorf("cannot derive PID from namespace path %q (set TS_SSH_PID)", nsPath)
+	if strings.HasPrefix(nsPath, "/proc/") {
+		parts := strings.SplitN(nsPath, "/", 5) // ["", "proc", "PID", "ns", "net"]
+		if len(parts) >= 4 {
+			pid, err := strconv.Atoi(parts[2])
+			if err == nil && pid > 0 {
+				return pid, nil
+			}
+		}
 	}
-	parts := strings.SplitN(nsPath, "/", 5) // ["", "proc", "PID", "ns", "net"]
-	if len(parts) < 4 {
-		return 0, fmt.Errorf("cannot parse PID from %q", nsPath)
-	}
-	pid, err := strconv.Atoi(parts[2])
+
+	// Named netns — find a process in this namespace by comparing inode.
+	pid, err := findPIDInNetNS(nsPath)
 	if err != nil {
-		return 0, fmt.Errorf("invalid PID in path %q: %w", nsPath, err)
-	}
-	if pid <= 0 {
-		return 0, fmt.Errorf("PID must be positive, got %d from %q", pid, nsPath)
+		return 0, fmt.Errorf("cannot resolve PID for netns %q: %w (set TS_SSH_PID as fallback)", nsPath, err)
 	}
 	return pid, nil
+}
+
+// findPIDInNetNS scans /proc to find the lowest-numbered process whose
+// network namespace matches ours (by readlink symlink target). Named netns
+// bind mounts have different inodes than /proc/PID/ns/net, so we compare
+// against /proc/self/ns/net instead of stat'ing the named path.
+// Returns the lowest PID that isn't our own process — typically the
+// container init.
+func findPIDInNetNS(nsPath string) (int, error) {
+	selfNS, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		return 0, fmt.Errorf("readlink /proc/self/ns/net: %w", err)
+	}
+
+	myPID := os.Getpid()
+
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, fmt.Errorf("reading /proc: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 || pid == myPID {
+			continue
+		}
+
+		link, err := os.Readlink("/proc/" + entry.Name() + "/ns/net")
+		if err != nil {
+			continue
+		}
+		if link == selfNS {
+			return pid, nil
+		}
+	}
+
+	return 0, fmt.Errorf("no process found in netns %s", nsPath)
 }

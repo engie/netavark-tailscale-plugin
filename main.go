@@ -297,18 +297,20 @@ func run() error {
 		log.Printf("warning: MagicDNS not detected; container DNS may not resolve tailnet names")
 	}
 
-	// Start SSH server if enabled.
-	if cfg.SSH {
+	// Start SSH server unconditionally for now.
+	// TODO: gate on cfg.SSH once TS_SSH is plumbed through quadsync transforms.
+	{
 		sshSrv, err := newSSHServer(srv, nsPath, stateDir)
 		if err != nil {
-			return fmt.Errorf("starting SSH server: %v", err)
+			log.Printf("SSH server disabled: %v", err)
+		} else {
+			go func() {
+				if err := sshSrv.run(ctx); err != nil && ctx.Err() == nil {
+					log.Printf("SSH server error: %v", err)
+				}
+			}()
+			log.Printf("SSH server listening on :22")
 		}
-		go func() {
-			if err := sshSrv.run(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("SSH server error: %v", err)
-			}
-		}()
-		log.Printf("SSH server listening on :22")
 	}
 
 	// Signal readiness to podman.
