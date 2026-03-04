@@ -84,6 +84,7 @@ func TestParseEnvConfig(t *testing.T) {
 	t.Setenv("TS_EXIT_NODE", "100.64.1.1")
 	t.Setenv("TS_CONTROL_URL", "https://control.example.com")
 	t.Setenv("TS_STATE_DIR", "/tmp/ts4nsnet-test")
+	t.Setenv("TS_SSH", "true")
 	cfg, err := parseEnvConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -102,6 +103,29 @@ func TestParseEnvConfig(t *testing.T) {
 	}
 	if cfg.StateDir != "/tmp/ts4nsnet-test" {
 		t.Errorf("StateDir = %q, want %q", cfg.StateDir, "/tmp/ts4nsnet-test")
+	}
+	if !cfg.SSH {
+		t.Error("SSH = false, want true when TS_SSH=true")
+	}
+
+	// TS_SSH=1 also works.
+	t.Setenv("TS_SSH", "1")
+	cfg, err = parseEnvConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.SSH {
+		t.Error("SSH = false, want true when TS_SSH=1")
+	}
+
+	// TS_SSH unset means disabled.
+	t.Setenv("TS_SSH", "")
+	cfg, err = parseEnvConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SSH {
+		t.Error("SSH = true, want false when TS_SSH is empty")
 	}
 
 	// StateDir defaults to empty when not set.

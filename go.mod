@@ -3,7 +3,9 @@ module github.com/stephenwan-opal/ts4nsnet
 go 1.25.6
 
 require (
+	github.com/creack/pty v1.1.23
 	github.com/tailscale/wireguard-go v0.0.0-20250716170648-1d0488a3d7da
+	golang.org/x/crypto v0.46.0
 	golang.org/x/sys v0.40.0
 	tailscale.com v1.95.0-pre.0.20260203171007-7b96c4c23e76
 )
@@ -33,7 +35,6 @@ require (
 	github.com/coder/websocket v1.8.12 // indirect
 	github.com/coreos/go-iptables v0.7.1-0.20240112124308-65c67c9f46e6 // indirect
 	github.com/creachadair/msync v0.7.1 // indirect
-	github.com/creack/pty v1.1.23 // indirect
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
 	github.com/dgryski/go-metro v0.0.0-20180109044635-280f6062b5bc // indirect
 	github.com/digitalocean/go-smbios v0.0.0-20180907143718-390a4f403a8e // indirect
@@ -84,7 +85,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
-	golang.org/x/crypto v0.46.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/exp/typeparams v0.0.0-20240314144324-c7f7c6466f7f // indirect
 	golang.org/x/mod v0.30.0 // indirect

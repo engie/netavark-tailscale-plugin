@@ -37,6 +37,7 @@ type envConfig struct {
 	ExitNode   string
 	ControlURL string
 	StateDir   string
+	SSH        bool
 }
 
 // validHostname matches a Tailscale hostname: lowercase alphanumeric and
@@ -64,6 +65,8 @@ func parseEnvConfig() (envConfig, error) {
 	if !validHostname.MatchString(c.Hostname) {
 		return c, fmt.Errorf("TS_HOSTNAME %q is not a valid hostname (lowercase alphanumeric and hyphens, 1-63 chars)", c.Hostname)
 	}
+	sshEnv := os.Getenv("TS_SSH")
+	c.SSH = sshEnv == "true" || sshEnv == "1"
 	return c, nil
 }
 
@@ -130,6 +133,15 @@ func main() {
 			fmt.Println("  --enable-seccomp    enable seccomp (ignored)")
 			fmt.Println("  --enable-ipv6       enable IPv6 (ignored, always enabled)")
 			fmt.Println("  --api-socket PATH   API socket (ignored)")
+			fmt.Println()
+			fmt.Println("Environment:")
+			fmt.Println("  TS_AUTHKEY          Tailscale auth key (required)")
+			fmt.Println("  TS_HOSTNAME         Tailscale hostname (required)")
+			fmt.Println("  TS_EXIT_NODE        Exit node IP")
+			fmt.Println("  TS_CONTROL_URL      Custom control server URL")
+			fmt.Println("  TS_STATE_DIR        Persistent state directory")
+			fmt.Println("  TS_SSH              Enable SSH server (true/1)")
+			fmt.Println("  TS_SSH_PID          Override container PID for nsenter")
 			os.Exit(0)
 		}
 	}
@@ -283,6 +295,20 @@ func run() error {
 		log.Printf("DNS ready (MagicDNS suffix: %q)", st.CurrentTailnet.MagicDNSSuffix)
 	} else {
 		log.Printf("warning: MagicDNS not detected; container DNS may not resolve tailnet names")
+	}
+
+	// Start SSH server if enabled.
+	if cfg.SSH {
+		sshSrv, err := newSSHServer(srv, nsPath, stateDir)
+		if err != nil {
+			return fmt.Errorf("starting SSH server: %v", err)
+		}
+		go func() {
+			if err := sshSrv.run(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("SSH server error: %v", err)
+			}
+		}()
+		log.Printf("SSH server listening on :22")
 	}
 
 	// Signal readiness to podman.
