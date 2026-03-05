@@ -405,6 +405,7 @@ func (s *sshServer) execInContainer(ctx context.Context, ch gossh.Channel, pid i
 	args := []string{
 		"-t", strconv.Itoa(pid),
 		"-m", "-u", "-i", "-n", "-p", "-C", "-F",
+		"--wd=/root",
 		"--",
 	}
 	if cmdArgs == nil {
@@ -415,7 +416,6 @@ func (s *sshServer) execInContainer(ctx context.Context, ch gossh.Channel, pid i
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	cmd.Env = envVars
-	cmd.Dir = "/root"
 
 	if winSize != nil {
 		// Allocate a PTY.
