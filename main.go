@@ -38,8 +38,7 @@ type envConfig struct {
 	ExitNode   string
 	ControlURL string
 	StateDir   string
-	SSH        bool
-	SSHAllow   []string // login names allowed to SSH (empty = allow all)
+	SSHAllow   []string // login names allowed to SSH; non-empty enables SSH
 }
 
 // validHostname matches a Tailscale hostname: lowercase alphanumeric and
@@ -67,8 +66,6 @@ func parseEnvConfig() (envConfig, error) {
 	if !validHostname.MatchString(c.Hostname) {
 		return c, fmt.Errorf("TS_HOSTNAME %q is not a valid hostname (lowercase alphanumeric and hyphens, 1-63 chars)", c.Hostname)
 	}
-	sshEnv := os.Getenv("TS_SSH")
-	c.SSH = sshEnv == "true" || sshEnv == "1"
 	if allow := os.Getenv("TS_SSH_ALLOW"); allow != "" {
 		c.SSHAllow = parseSSHAllow(allow)
 	}
@@ -145,8 +142,7 @@ func main() {
 			fmt.Println("  TS_EXIT_NODE        Exit node IP")
 			fmt.Println("  TS_CONTROL_URL      Custom control server URL")
 			fmt.Println("  TS_STATE_DIR        Persistent state directory")
-			fmt.Println("  TS_SSH              Enable SSH server (true/1)")
-			fmt.Println("  TS_SSH_ALLOW        Comma-separated allowlist of login names (* for all)")
+			fmt.Println("  TS_SSH_ALLOW        Comma-separated allowlist of login names (* for all); enables SSH")
 			fmt.Println("  TS_SSH_PID          Override container PID for nsenter")
 			os.Exit(0)
 		}
@@ -303,8 +299,8 @@ func run() error {
 		log.Printf("warning: MagicDNS not detected; container DNS may not resolve tailnet names")
 	}
 
-	// Start SSH server if enabled.
-	if cfg.SSH {
+	// Start SSH server if allowlist is configured.
+	if len(cfg.SSHAllow) > 0 {
 		sshSrv, err := newSSHServer(srv, nsPath, stateDir, cfg.SSHAllow)
 		if err != nil {
 			log.Printf("SSH server disabled: %v", err)
@@ -314,11 +310,7 @@ func run() error {
 					log.Printf("SSH server error: %v", err)
 				}
 			}()
-			if len(cfg.SSHAllow) == 0 {
-				log.Printf("SSH server listening on :22 (deny all — set TS_SSH_ALLOW)")
-			} else {
-				log.Printf("SSH server listening on :22 (allow: %s)", strings.Join(cfg.SSHAllow, ", "))
-			}
+			log.Printf("SSH server listening on :22 (allow: %s)", strings.Join(cfg.SSHAllow, ", "))
 		}
 	}
 

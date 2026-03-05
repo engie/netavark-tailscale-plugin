@@ -84,7 +84,6 @@ func TestParseEnvConfig(t *testing.T) {
 	t.Setenv("TS_EXIT_NODE", "100.64.1.1")
 	t.Setenv("TS_CONTROL_URL", "https://control.example.com")
 	t.Setenv("TS_STATE_DIR", "/tmp/ts4nsnet-test")
-	t.Setenv("TS_SSH", "true")
 	cfg, err := parseEnvConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -104,30 +103,6 @@ func TestParseEnvConfig(t *testing.T) {
 	if cfg.StateDir != "/tmp/ts4nsnet-test" {
 		t.Errorf("StateDir = %q, want %q", cfg.StateDir, "/tmp/ts4nsnet-test")
 	}
-	if !cfg.SSH {
-		t.Error("SSH = false, want true when TS_SSH=true")
-	}
-
-	// TS_SSH=1 also works.
-	t.Setenv("TS_SSH", "1")
-	cfg, err = parseEnvConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cfg.SSH {
-		t.Error("SSH = false, want true when TS_SSH=1")
-	}
-
-	// TS_SSH unset means disabled.
-	t.Setenv("TS_SSH", "")
-	cfg, err = parseEnvConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.SSH {
-		t.Error("SSH = true, want false when TS_SSH is empty")
-	}
-
 	// TS_SSH_ALLOW parses into SSHAllow.
 	t.Setenv("TS_SSH_ALLOW", "alice@example.com,bob@example.com")
 	cfg, err = parseEnvConfig()
@@ -138,7 +113,7 @@ func TestParseEnvConfig(t *testing.T) {
 		t.Errorf("SSHAllow = %v, want [alice@example.com bob@example.com]", cfg.SSHAllow)
 	}
 
-	// TS_SSH_ALLOW empty means no allowlist.
+	// TS_SSH_ALLOW empty means SSH disabled.
 	t.Setenv("TS_SSH_ALLOW", "")
 	cfg, err = parseEnvConfig()
 	if err != nil {
