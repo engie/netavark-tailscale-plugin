@@ -35,15 +35,15 @@ import (
 type sshServer struct {
 	tsnetSrv  *tsnet.Server
 	hostKey   gossh.Signer
-	nsPath    string   // network namespace path for PID resolution
-	allow     []string // allowed login names (empty = allow all)
-	acceptEnv []string // additional env var patterns to accept (from TS_SSH_ACCEPT_ENV)
+	nsPath    string            // network namespace path for PID resolution
+	allow     map[string]string // tailnet login → container user (empty = deny all)
+	acceptEnv []string          // additional env var patterns to accept (from TS_SSH_ACCEPT_ENV)
 }
 
 // newSSHServer creates an SSH server that will listen on the tsnet interface.
-// If allow is non-empty, only peers whose UserProfile.LoginName matches an
-// entry are permitted to open sessions.
-func newSSHServer(srv *tsnet.Server, nsPath string, stateDir string, allow []string, acceptEnv []string) (*sshServer, error) {
+// allow maps tailnet login names to container usernames. Only peers whose
+// UserProfile.LoginName appears in the map (or "*" wildcard) are permitted.
+func newSSHServer(srv *tsnet.Server, nsPath string, stateDir string, allow map[string]string, acceptEnv []string) (*sshServer, error) {
 	hostKey, err := loadOrGenerateHostKey(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("host key: %w", err)
@@ -58,29 +58,37 @@ func newSSHServer(srv *tsnet.Server, nsPath string, stateDir string, allow []str
 	}, nil
 }
 
-// parseSSHAllow splits a comma-separated allowlist into trimmed, non-empty
-// login names.
-func parseSSHAllow(s string) []string {
-	var out []string
+// parseSSHAllow parses a comma-separated list of identity:user pairs into a
+// map from tailnet login name to container username. Each entry must be in
+// the form "identity:user" (e.g. "alice@example.com:root" or "*:dave").
+func parseSSHAllow(s string) (map[string]string, error) {
+	m := make(map[string]string)
 	for _, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
+		if part == "" {
+			continue
 		}
+		identity, user, ok := strings.Cut(part, ":")
+		if !ok || identity == "" || user == "" {
+			return nil, fmt.Errorf("invalid TS_SSH_ALLOW entry %q: expected identity:user", part)
+		}
+		m[identity] = user
 	}
-	return out
+	return m, nil
 }
 
 // isAllowed reports whether the given login name is permitted by the
-// allowlist. If the allowlist contains "*", all tailnet peers are allowed.
-// An empty allowlist denies all peers.
-func (s *sshServer) isAllowed(loginName string) bool {
-	for _, a := range s.allow {
-		if a == "*" || a == loginName {
-			return true
-		}
+// allowlist. Returns the container username to use and whether access is
+// granted. If the allowlist contains a "*" key, it matches any peer not
+// explicitly listed. An empty allowlist denies all peers.
+func (s *sshServer) isAllowed(loginName string) (string, bool) {
+	if user, ok := s.allow[loginName]; ok {
+		return user, true
 	}
-	return false
+	if user, ok := s.allow["*"]; ok {
+		return user, true
+	}
+	return "", false
 }
 
 // acceptEnvPair reports whether the env var name is unconditionally safe
@@ -156,10 +164,18 @@ func (s *sshServer) isAllowedEnv(name string) bool {
 	return false
 }
 
-// parsePasswdShell reads /etc/passwd-formatted lines from r and returns the
-// login shell (field 7) for the given username. Returns "/bin/sh" if the
-// user is not found or the file is malformed.
-func parsePasswdShell(r io.Reader, username string) string {
+// passwdEntry holds parsed /etc/passwd fields for a user.
+type passwdEntry struct {
+	Username string
+	UID      int
+	GID      int
+	Home     string
+	Shell    string
+}
+
+// parsePasswdUser reads /etc/passwd-formatted lines from r and returns
+// the entry for the given username. Returns false if the user is not found.
+func parsePasswdUser(r io.Reader, username string) (passwdEntry, bool) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -168,37 +184,57 @@ func parsePasswdShell(r io.Reader, username string) string {
 		}
 		fields := strings.Split(line, ":")
 		if len(fields) >= 7 && fields[0] == username {
-			shell := fields[6]
-			if shell != "" {
-				return shell
+			entry := passwdEntry{Username: username, Shell: "/bin/sh", Home: "/"}
+			if uid, err := strconv.Atoi(fields[2]); err == nil {
+				entry.UID = uid
 			}
-			return "/bin/sh"
+			if gid, err := strconv.Atoi(fields[3]); err == nil {
+				entry.GID = gid
+			}
+			if fields[5] != "" {
+				entry.Home = fields[5]
+			}
+			if fields[6] != "" {
+				entry.Shell = fields[6]
+			}
+			return entry, true
 		}
 	}
-	return "/bin/sh"
+	return passwdEntry{}, false
 }
 
-// lookupShellInContainer reads the container's /etc/passwd (via /proc/<pid>/root)
-// and returns the login shell for root. Falls back to /bin/sh.
-func lookupShellInContainer(pid int) string {
+// lookupUserInContainer reads the container's /etc/passwd (via /proc/<pid>/root)
+// and returns the passwd entry for the given username. Falls back to sensible
+// defaults for root; returns an error for other users not found in passwd.
+func lookupUserInContainer(pid int, username string) (passwdEntry, error) {
 	path := fmt.Sprintf("/proc/%d/root/etc/passwd", pid)
 	f, err := os.Open(path)
 	if err != nil {
-		log.Printf("SSH: cannot read container passwd (%s): %v; defaulting to /bin/sh", path, err)
-		return "/bin/sh"
+		if username == "root" {
+			log.Printf("SSH: cannot read container passwd (%s): %v; using defaults for root", path, err)
+			return passwdEntry{Username: "root", UID: 0, GID: 0, Home: "/root", Shell: "/bin/sh"}, nil
+		}
+		return passwdEntry{}, fmt.Errorf("cannot read container passwd: %w", err)
 	}
 	defer f.Close()
-	return parsePasswdShell(f, "root")
+	entry, found := parsePasswdUser(f, username)
+	if !found {
+		if username == "root" {
+			return passwdEntry{Username: "root", UID: 0, GID: 0, Home: "/root", Shell: "/bin/sh"}, nil
+		}
+		return passwdEntry{}, fmt.Errorf("user %q not found in container /etc/passwd", username)
+	}
+	return entry, nil
 }
 
-// baseEnvForRoot returns the standard environment variables for a root
-// login shell inside the container.
-func baseEnvForRoot(shell string) []string {
+// baseEnvForUser returns the standard environment variables for a login
+// shell inside the container for the given user.
+func baseEnvForUser(entry passwdEntry) []string {
 	return []string{
-		"HOME=/root",
-		"USER=root",
-		"LOGNAME=root",
-		"SHELL=" + shell,
+		"HOME=" + entry.Home,
+		"USER=" + entry.Username,
+		"LOGNAME=" + entry.Username,
+		"SHELL=" + entry.Shell,
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 	}
 }
@@ -265,12 +301,13 @@ func (s *sshServer) handleConn(ctx context.Context, nc net.Conn) {
 	peerLogin := who.UserProfile.LoginName
 	peerNode := who.Node.Name
 
-	if !s.isAllowed(peerLogin) {
+	localUser, ok := s.isAllowed(peerLogin)
+	if !ok {
 		log.Printf("SSH: rejected %s (%s): not in allowlist", peerLogin, peerNode)
 		return
 	}
 
-	log.Printf("SSH session from %s (%s)", peerLogin, peerNode)
+	log.Printf("SSH session from %s (%s) as %s", peerLogin, peerNode, localUser)
 
 	// Discard global requests (keepalives, etc).
 	go gossh.DiscardRequests(reqs)
@@ -285,14 +322,14 @@ func (s *sshServer) handleConn(ctx context.Context, nc net.Conn) {
 			log.Printf("SSH: failed to accept channel: %v", err)
 			continue
 		}
-		go s.handleSession(ctx, ch, reqs)
+		go s.handleSession(ctx, ch, reqs, localUser)
 	}
 }
 
 // handleSession processes requests on an SSH session channel: pty-req,
 // window-change, env, shell, and exec. Commands are run via nsenter into
-// the container's namespaces.
-func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-chan *gossh.Request) {
+// the container's namespaces as localUser.
+func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-chan *gossh.Request, localUser string) {
 	defer ch.Close()
 
 	var (
@@ -351,9 +388,15 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 				sendExitStatus(ch, 1)
 				return
 			}
-			shell := lookupShellInContainer(pid)
-			env := s.buildEnv(shell, term, envVars)
-			exitCode := s.execInContainer(ctx, ch, pid, nil, shell, env, winSize, &ptmx)
+			entry, err := lookupUserInContainer(pid, localUser)
+			if err != nil {
+				log.Printf("SSH: failed to resolve user %q: %v", localUser, err)
+				fmt.Fprintf(ch, "failed to resolve user %q: %v\r\n", localUser, err)
+				sendExitStatus(ch, 1)
+				return
+			}
+			env := s.buildEnv(entry, term, envVars)
+			exitCode := s.execInContainer(ctx, ch, pid, nil, entry, env, winSize, &ptmx)
 			sendExitStatus(ch, exitCode)
 			return
 
@@ -371,10 +414,16 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 				sendExitStatus(ch, 1)
 				return
 			}
-			shell := lookupShellInContainer(pid)
-			env := s.buildEnv(shell, term, envVars)
-			cmdArgs := []string{"/bin/sh", "-c", e.Command}
-			exitCode := s.execInContainer(ctx, ch, pid, cmdArgs, shell, env, winSize, &ptmx)
+			entry, err := lookupUserInContainer(pid, localUser)
+			if err != nil {
+				log.Printf("SSH: failed to resolve user %q: %v", localUser, err)
+				fmt.Fprintf(ch, "failed to resolve user %q: %v\r\n", localUser, err)
+				sendExitStatus(ch, 1)
+				return
+			}
+			env := s.buildEnv(entry, term, envVars)
+			cmdArgs := []string{"/bin/sh", "-c", `cd "$HOME" 2>/dev/null; ` + e.Command}
+			exitCode := s.execInContainer(ctx, ch, pid, cmdArgs, entry, env, winSize, &ptmx)
 			sendExitStatus(ch, exitCode)
 			return
 
@@ -389,8 +438,8 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 // buildEnv constructs the full environment for the container process.
 // Base env (HOME, USER, etc.) is set first, then TERM from pty-req,
 // then client-sent env vars (which can override base values).
-func (s *sshServer) buildEnv(shell, term string, clientEnv []string) []string {
-	env := baseEnvForRoot(shell)
+func (s *sshServer) buildEnv(entry passwdEntry, term string, clientEnv []string) []string {
+	env := baseEnvForUser(entry)
 	if term != "" {
 		env = append(env, "TERM="+term)
 	}
@@ -400,16 +449,24 @@ func (s *sshServer) buildEnv(shell, term string, clientEnv []string) []string {
 
 // execInContainer runs a command inside the container's namespaces via
 // nsenter. If cmdArgs is nil, it runs an interactive login shell using
-// the given shell path with -l. Returns the process exit code.
-func (s *sshServer) execInContainer(ctx context.Context, ch gossh.Channel, pid int, cmdArgs []string, shell string, envVars []string, winSize *pty.Winsize, ptmx **os.File) int {
+// the user's shell with -l. Returns the process exit code.
+func (s *sshServer) execInContainer(ctx context.Context, ch gossh.Channel, pid int, cmdArgs []string, entry passwdEntry, envVars []string, winSize *pty.Winsize, ptmx **os.File) int {
 	args := []string{
 		"-t", strconv.Itoa(pid),
 		"-m", "-u", "-i", "-n", "-p", "-C", "-F",
-		"--wd=/root",
-		"--",
 	}
+	// Only use setuid/setgid for non-root users. In rootless podman,
+	// we already enter as UID 0 inside the user namespace, and -S/-G
+	// would require CAP_SETUID/CAP_SETGID which we don't have.
+	if entry.UID != 0 || entry.GID != 0 {
+		args = append(args, "-S", strconv.Itoa(entry.UID), "-G", strconv.Itoa(entry.GID))
+	}
+	args = append(args, "--")
 	if cmdArgs == nil {
-		args = append(args, shell, "-l")
+		// Use sh to cd to $HOME before exec'ing the login shell.
+		// nsenter's --wd resolves on the host filesystem, which fails
+		// in rootless podman where the host user can't access /root.
+		args = append(args, "/bin/sh", "-c", `cd "$HOME" 2>/dev/null; exec `+entry.Shell+` -l`)
 	} else {
 		args = append(args, cmdArgs...)
 	}

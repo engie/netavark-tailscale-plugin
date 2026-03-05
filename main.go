@@ -38,7 +38,7 @@ type envConfig struct {
 	ExitNode   string
 	ControlURL string
 	StateDir   string
-	SSHAllow     []string // login names allowed to SSH; non-empty enables SSH
+	SSHAllow     map[string]string // tailnet login → container user; non-empty enables SSH
 	SSHAcceptEnv []string // additional env var patterns to accept over SSH
 }
 
@@ -68,7 +68,11 @@ func parseEnvConfig() (envConfig, error) {
 		return c, fmt.Errorf("TS_HOSTNAME %q is not a valid hostname (lowercase alphanumeric and hyphens, 1-63 chars)", c.Hostname)
 	}
 	if allow := os.Getenv("TS_SSH_ALLOW"); allow != "" {
-		c.SSHAllow = parseSSHAllow(allow)
+		parsed, err := parseSSHAllow(allow)
+		if err != nil {
+			return c, err
+		}
+		c.SSHAllow = parsed
 	}
 	if acceptEnv := os.Getenv("TS_SSH_ACCEPT_ENV"); acceptEnv != "" {
 		c.SSHAcceptEnv = parseAcceptEnv(acceptEnv)
@@ -146,7 +150,7 @@ func main() {
 			fmt.Println("  TS_EXIT_NODE        Exit node IP")
 			fmt.Println("  TS_CONTROL_URL      Custom control server URL")
 			fmt.Println("  TS_STATE_DIR        Persistent state directory")
-			fmt.Println("  TS_SSH_ALLOW        Comma-separated allowlist of login names (* for all); enables SSH")
+			fmt.Println("  TS_SSH_ALLOW        Comma-separated identity:user pairs (e.g. alice@example.com:root,*:dave); enables SSH")
 			fmt.Println("  TS_SSH_ACCEPT_ENV   Comma-separated env var patterns to accept over SSH (*,? wildcards)")
 			fmt.Println("  TS_SSH_PID          Override container PID for nsenter")
 			os.Exit(0)
@@ -315,7 +319,11 @@ func run() error {
 					log.Printf("SSH server error: %v", err)
 				}
 			}()
-			log.Printf("SSH server listening on :22 (allow: %s)", strings.Join(cfg.SSHAllow, ", "))
+			var allowPairs []string
+			for identity, user := range cfg.SSHAllow {
+				allowPairs = append(allowPairs, identity+":"+user)
+			}
+			log.Printf("SSH server listening on :22 (allow: %s)", strings.Join(allowPairs, ", "))
 		}
 	}
 

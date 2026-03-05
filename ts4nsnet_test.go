@@ -104,13 +104,13 @@ func TestParseEnvConfig(t *testing.T) {
 		t.Errorf("StateDir = %q, want %q", cfg.StateDir, "/tmp/ts4nsnet-test")
 	}
 	// TS_SSH_ALLOW parses into SSHAllow.
-	t.Setenv("TS_SSH_ALLOW", "alice@example.com,bob@example.com")
+	t.Setenv("TS_SSH_ALLOW", "alice@example.com:root,bob@example.com:dave")
 	cfg, err = parseEnvConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(cfg.SSHAllow) != 2 || cfg.SSHAllow[0] != "alice@example.com" || cfg.SSHAllow[1] != "bob@example.com" {
-		t.Errorf("SSHAllow = %v, want [alice@example.com bob@example.com]", cfg.SSHAllow)
+	if len(cfg.SSHAllow) != 2 || cfg.SSHAllow["alice@example.com"] != "root" || cfg.SSHAllow["bob@example.com"] != "dave" {
+		t.Errorf("SSHAllow = %v, want map[alice@example.com:root bob@example.com:dave]", cfg.SSHAllow)
 	}
 
 	// TS_SSH_ALLOW empty means SSH disabled.
@@ -122,6 +122,14 @@ func TestParseEnvConfig(t *testing.T) {
 	if len(cfg.SSHAllow) != 0 {
 		t.Errorf("SSHAllow = %v, want empty", cfg.SSHAllow)
 	}
+
+	// TS_SSH_ALLOW invalid format returns error.
+	t.Setenv("TS_SSH_ALLOW", "alice@example.com")
+	_, err = parseEnvConfig()
+	if err == nil {
+		t.Error("expected error for TS_SSH_ALLOW without :user suffix")
+	}
+	t.Setenv("TS_SSH_ALLOW", "")
 
 	// StateDir defaults to empty when not set.
 	t.Setenv("TS_STATE_DIR", "")

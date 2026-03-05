@@ -210,28 +210,37 @@ func TestSSHPayloadParsing(t *testing.T) {
 
 func TestParseSSHAllow(t *testing.T) {
 	tests := []struct {
-		input string
-		want  []string
+		input   string
+		want    map[string]string
+		wantErr bool
 	}{
-		{"", nil},
-		{"alice@example.com", []string{"alice@example.com"}},
-		{"alice@example.com,bob@example.com", []string{"alice@example.com", "bob@example.com"}},
-		{" alice@example.com , bob@example.com ", []string{"alice@example.com", "bob@example.com"}},
-		{"alice@example.com,,bob@example.com", []string{"alice@example.com", "bob@example.com"}},
-		{",,,", nil},
+		{"", map[string]string{}, false},
+		{"alice@example.com:root", map[string]string{"alice@example.com": "root"}, false},
+		{"alice@example.com:root,bob@example.com:dave", map[string]string{"alice@example.com": "root", "bob@example.com": "dave"}, false},
+		{" alice@example.com:root , bob@example.com:dave ", map[string]string{"alice@example.com": "root", "bob@example.com": "dave"}, false},
+		{"*:root", map[string]string{"*": "root"}, false},
+		{",,,", map[string]string{}, false},
+		// Errors: missing user part.
+		{"alice@example.com", nil, true},
+		{"alice@example.com:", nil, true},
+		{":root", nil, true},
 	}
 	for _, tt := range tests {
-		got := parseSSHAllow(tt.input)
-		if len(got) == 0 && len(tt.want) == 0 {
+		got, err := parseSSHAllow(tt.input)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("parseSSHAllow(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			continue
+		}
+		if tt.wantErr {
 			continue
 		}
 		if len(got) != len(tt.want) {
 			t.Errorf("parseSSHAllow(%q) = %v, want %v", tt.input, got, tt.want)
 			continue
 		}
-		for i := range got {
-			if got[i] != tt.want[i] {
-				t.Errorf("parseSSHAllow(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+		for k, wantV := range tt.want {
+			if gotV, ok := got[k]; !ok || gotV != wantV {
+				t.Errorf("parseSSHAllow(%q)[%q] = %q, want %q", tt.input, k, gotV, wantV)
 			}
 		}
 	}
@@ -239,24 +248,31 @@ func TestParseSSHAllow(t *testing.T) {
 
 func TestSSHAllowlist(t *testing.T) {
 	tests := []struct {
-		name  string
-		allow []string
-		login string
-		want  bool
+		name     string
+		allow    map[string]string
+		login    string
+		wantUser string
+		wantOK   bool
 	}{
-		{"empty denies all", nil, "anyone@example.com", false},
-		{"match", []string{"alice@example.com"}, "alice@example.com", true},
-		{"no match", []string{"alice@example.com"}, "bob@example.com", false},
-		{"multiple entries match second", []string{"alice@example.com", "bob@example.com"}, "bob@example.com", true},
-		{"multiple entries no match", []string{"alice@example.com", "bob@example.com"}, "eve@example.com", false},
-		{"case sensitive", []string{"Alice@example.com"}, "alice@example.com", false},
-		{"wildcard allows all", []string{"*"}, "anyone@example.com", true},
+		{"empty denies all", nil, "anyone@example.com", "", false},
+		{"match returns user", map[string]string{"alice@example.com": "root"}, "alice@example.com", "root", true},
+		{"no match", map[string]string{"alice@example.com": "root"}, "bob@example.com", "", false},
+		{"multiple entries match second", map[string]string{"alice@example.com": "root", "bob@example.com": "dave"}, "bob@example.com", "dave", true},
+		{"multiple entries no match", map[string]string{"alice@example.com": "root", "bob@example.com": "dave"}, "eve@example.com", "", false},
+		{"case sensitive", map[string]string{"Alice@example.com": "root"}, "alice@example.com", "", false},
+		{"wildcard allows all", map[string]string{"*": "guest"}, "anyone@example.com", "guest", true},
+		{"exact match takes precedence over wildcard", map[string]string{"alice@example.com": "alice", "*": "guest"}, "alice@example.com", "alice", true},
+		{"wildcard used for non-exact", map[string]string{"alice@example.com": "alice", "*": "guest"}, "bob@example.com", "guest", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &sshServer{allow: tt.allow}
-			if got := s.isAllowed(tt.login); got != tt.want {
-				t.Errorf("isAllowed(%q) = %v, want %v", tt.login, got, tt.want)
+			gotUser, gotOK := s.isAllowed(tt.login)
+			if gotOK != tt.wantOK {
+				t.Errorf("isAllowed(%q) ok = %v, want %v", tt.login, gotOK, tt.wantOK)
+			}
+			if gotUser != tt.wantUser {
+				t.Errorf("isAllowed(%q) user = %q, want %q", tt.login, gotUser, tt.wantUser)
 			}
 		})
 	}
@@ -379,74 +395,85 @@ func TestIsAllowedEnv(t *testing.T) {
 	}
 }
 
-func TestParsePasswdShell(t *testing.T) {
+func TestParsePasswdUser(t *testing.T) {
 	tests := []struct {
-		name     string
-		content  string
-		username string
-		want     string
+		name      string
+		content   string
+		username  string
+		wantFound bool
+		wantEntry passwdEntry
 	}{
 		{
-			name:     "normal root entry",
-			content:  "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:Nobody:/:/usr/bin/nologin\n",
-			username: "root",
-			want:     "/bin/bash",
+			name:      "normal root entry",
+			content:   "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:Nobody:/:/usr/bin/nologin\n",
+			username:  "root",
+			wantFound: true,
+			wantEntry: passwdEntry{Username: "root", UID: 0, GID: 0, Home: "/root", Shell: "/bin/bash"},
 		},
 		{
-			name:     "root with zsh",
-			content:  "root:x:0:0:root:/root:/bin/zsh\n",
-			username: "root",
-			want:     "/bin/zsh",
+			name:      "root with zsh",
+			content:   "root:x:0:0:root:/root:/bin/zsh\n",
+			username:  "root",
+			wantFound: true,
+			wantEntry: passwdEntry{Username: "root", UID: 0, GID: 0, Home: "/root", Shell: "/bin/zsh"},
 		},
 		{
-			name:     "root not present",
-			content:  "nobody:x:65534:65534:Nobody:/:/usr/bin/nologin\n",
-			username: "root",
-			want:     "/bin/sh",
+			name:      "root not present",
+			content:   "nobody:x:65534:65534:Nobody:/:/usr/bin/nologin\n",
+			username:  "root",
+			wantFound: false,
 		},
 		{
-			name:     "empty file",
-			content:  "",
-			username: "root",
-			want:     "/bin/sh",
+			name:      "empty file",
+			content:   "",
+			username:  "root",
+			wantFound: false,
 		},
 		{
-			name:     "malformed lines",
-			content:  "garbage\nroot:x:0:0\nmore garbage\n",
-			username: "root",
-			want:     "/bin/sh",
+			name:      "malformed lines",
+			content:   "garbage\nroot:x:0:0\nmore garbage\n",
+			username:  "root",
+			wantFound: false,
 		},
 		{
-			name:     "root with empty shell field",
-			content:  "root:x:0:0:root:/root:\n",
-			username: "root",
-			want:     "/bin/sh",
+			name:      "root with empty shell field",
+			content:   "root:x:0:0:root:/root:\n",
+			username:  "root",
+			wantFound: true,
+			wantEntry: passwdEntry{Username: "root", UID: 0, GID: 0, Home: "/root", Shell: "/bin/sh"},
 		},
 		{
-			name:     "comment lines skipped",
-			content:  "# comment\nroot:x:0:0:root:/root:/bin/bash\n",
-			username: "root",
-			want:     "/bin/bash",
+			name:      "comment lines skipped",
+			content:   "# comment\nroot:x:0:0:root:/root:/bin/bash\n",
+			username:  "root",
+			wantFound: true,
+			wantEntry: passwdEntry{Username: "root", UID: 0, GID: 0, Home: "/root", Shell: "/bin/bash"},
 		},
 		{
-			name:     "lookup non-root user",
-			content:  "root:x:0:0:root:/root:/bin/bash\nstephen:x:1000:1000:Stephen:/home/stephen:/bin/fish\n",
-			username: "stephen",
-			want:     "/bin/fish",
+			name:      "lookup non-root user",
+			content:   "root:x:0:0:root:/root:/bin/bash\nstephen:x:1000:1000:Stephen:/home/stephen:/bin/fish\n",
+			username:  "stephen",
+			wantFound: true,
+			wantEntry: passwdEntry{Username: "stephen", UID: 1000, GID: 1000, Home: "/home/stephen", Shell: "/bin/fish"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parsePasswdShell(strings.NewReader(tt.content), tt.username)
-			if got != tt.want {
-				t.Errorf("parsePasswdShell(%q) = %q, want %q", tt.username, got, tt.want)
+			got, found := parsePasswdUser(strings.NewReader(tt.content), tt.username)
+			if found != tt.wantFound {
+				t.Errorf("parsePasswdUser(%q) found = %v, want %v", tt.username, found, tt.wantFound)
+				return
+			}
+			if found && got != tt.wantEntry {
+				t.Errorf("parsePasswdUser(%q) = %+v, want %+v", tt.username, got, tt.wantEntry)
 			}
 		})
 	}
 }
 
-func TestBaseEnvForRoot(t *testing.T) {
-	env := baseEnvForRoot("/bin/bash")
+func TestBaseEnvForUser(t *testing.T) {
+	entry := passwdEntry{Username: "root", UID: 0, GID: 0, Home: "/root", Shell: "/bin/bash"}
+	env := baseEnvForUser(entry)
 	want := map[string]string{
 		"HOME":    "/root",
 		"USER":    "root",
@@ -474,15 +501,22 @@ func TestBaseEnvForRoot(t *testing.T) {
 		t.Errorf("got %d env vars, want %d", len(got), len(want))
 	}
 
-	// Verify shell is passed through correctly.
-	env2 := baseEnvForRoot("/bin/sh")
+	// Verify non-root user env.
+	entry2 := passwdEntry{Username: "dave", UID: 1000, GID: 1000, Home: "/home/dave", Shell: "/bin/zsh"}
+	env2 := baseEnvForUser(entry2)
+	got2 := make(map[string]string)
 	for _, e := range env2 {
-		if strings.HasPrefix(e, "SHELL=") {
-			if e != "SHELL=/bin/sh" {
-				t.Errorf("SHELL = %q, want SHELL=/bin/sh", e)
-			}
-			break
-		}
+		k, v, _ := strings.Cut(e, "=")
+		got2[k] = v
+	}
+	if got2["HOME"] != "/home/dave" {
+		t.Errorf("HOME = %q, want /home/dave", got2["HOME"])
+	}
+	if got2["USER"] != "dave" {
+		t.Errorf("USER = %q, want dave", got2["USER"])
+	}
+	if got2["SHELL"] != "/bin/zsh" {
+		t.Errorf("SHELL = %q, want /bin/zsh", got2["SHELL"])
 	}
 }
 
@@ -529,7 +563,7 @@ func TestSSHServerConnects(t *testing.T) {
 
 	// Start SSH server on node 1.
 	stateDir := t.TempDir()
-	sshSrv, err := newSSHServer(srv1, "/proc/1/ns/net", stateDir, []string{"*"}, nil)
+	sshSrv, err := newSSHServer(srv1, "/proc/1/ns/net", stateDir, map[string]string{"*": "root"}, nil)
 	if err != nil {
 		t.Fatalf("newSSHServer: %v", err)
 	}
