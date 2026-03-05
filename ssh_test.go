@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,6 +376,113 @@ func TestIsAllowedEnv(t *testing.T) {
 				t.Errorf("isAllowedEnv(%q) = %v, want %v", tt.envName, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParsePasswdShell(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		username string
+		want     string
+	}{
+		{
+			name:     "normal root entry",
+			content:  "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:Nobody:/:/usr/bin/nologin\n",
+			username: "root",
+			want:     "/bin/bash",
+		},
+		{
+			name:     "root with zsh",
+			content:  "root:x:0:0:root:/root:/bin/zsh\n",
+			username: "root",
+			want:     "/bin/zsh",
+		},
+		{
+			name:     "root not present",
+			content:  "nobody:x:65534:65534:Nobody:/:/usr/bin/nologin\n",
+			username: "root",
+			want:     "/bin/sh",
+		},
+		{
+			name:     "empty file",
+			content:  "",
+			username: "root",
+			want:     "/bin/sh",
+		},
+		{
+			name:     "malformed lines",
+			content:  "garbage\nroot:x:0:0\nmore garbage\n",
+			username: "root",
+			want:     "/bin/sh",
+		},
+		{
+			name:     "root with empty shell field",
+			content:  "root:x:0:0:root:/root:\n",
+			username: "root",
+			want:     "/bin/sh",
+		},
+		{
+			name:     "comment lines skipped",
+			content:  "# comment\nroot:x:0:0:root:/root:/bin/bash\n",
+			username: "root",
+			want:     "/bin/bash",
+		},
+		{
+			name:     "lookup non-root user",
+			content:  "root:x:0:0:root:/root:/bin/bash\nstephen:x:1000:1000:Stephen:/home/stephen:/bin/fish\n",
+			username: "stephen",
+			want:     "/bin/fish",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parsePasswdShell(strings.NewReader(tt.content), tt.username)
+			if got != tt.want {
+				t.Errorf("parsePasswdShell(%q) = %q, want %q", tt.username, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBaseEnvForRoot(t *testing.T) {
+	env := baseEnvForRoot("/bin/bash")
+	want := map[string]string{
+		"HOME":    "/root",
+		"USER":    "root",
+		"LOGNAME": "root",
+		"SHELL":   "/bin/bash",
+		"PATH":    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	}
+	got := make(map[string]string)
+	for _, e := range env {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok {
+			t.Errorf("malformed env entry: %q", e)
+			continue
+		}
+		got[k] = v
+	}
+	for k, wantV := range want {
+		if gotV, ok := got[k]; !ok {
+			t.Errorf("missing env var %s", k)
+		} else if gotV != wantV {
+			t.Errorf("%s = %q, want %q", k, gotV, wantV)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("got %d env vars, want %d", len(got), len(want))
+	}
+
+	// Verify shell is passed through correctly.
+	env2 := baseEnvForRoot("/bin/sh")
+	for _, e := range env2 {
+		if strings.HasPrefix(e, "SHELL=") {
+			if e != "SHELL=/bin/sh" {
+				t.Errorf("SHELL = %q, want SHELL=/bin/sh", e)
+			}
+			break
+		}
 	}
 }
 

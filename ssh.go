@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -155,6 +156,53 @@ func (s *sshServer) isAllowedEnv(name string) bool {
 	return false
 }
 
+// parsePasswdShell reads /etc/passwd-formatted lines from r and returns the
+// login shell (field 7) for the given username. Returns "/bin/sh" if the
+// user is not found or the file is malformed.
+func parsePasswdShell(r io.Reader, username string) string {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) >= 7 && fields[0] == username {
+			shell := fields[6]
+			if shell != "" {
+				return shell
+			}
+			return "/bin/sh"
+		}
+	}
+	return "/bin/sh"
+}
+
+// lookupShellInContainer reads the container's /etc/passwd (via /proc/<pid>/root)
+// and returns the login shell for root. Falls back to /bin/sh.
+func lookupShellInContainer(pid int) string {
+	path := fmt.Sprintf("/proc/%d/root/etc/passwd", pid)
+	f, err := os.Open(path)
+	if err != nil {
+		log.Printf("SSH: cannot read container passwd (%s): %v; defaulting to /bin/sh", path, err)
+		return "/bin/sh"
+	}
+	defer f.Close()
+	return parsePasswdShell(f, "root")
+}
+
+// baseEnvForRoot returns the standard environment variables for a root
+// login shell inside the container.
+func baseEnvForRoot(shell string) []string {
+	return []string{
+		"HOME=/root",
+		"USER=root",
+		"LOGNAME=root",
+		"SHELL=" + shell,
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	}
+}
+
 // containerPID resolves the container init PID at call time (not cached).
 // This avoids stale PIDs from transient setup processes.
 func (s *sshServer) containerPID() (int, error) {
@@ -248,9 +296,10 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 	defer ch.Close()
 
 	var (
-		ptmx     *os.File
-		winSize  *pty.Winsize
-		envVars  []string
+		ptmx    *os.File
+		winSize *pty.Winsize
+		envVars []string // client-sent env vars (filtered by allowlist)
+		term    string   // TERM value from pty-req payload
 	)
 
 	for req := range reqs {
@@ -266,6 +315,7 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 				Cols: uint16(p.Width),
 				Rows: uint16(p.Height),
 			}
+			term = p.Term
 			req.Reply(true, nil)
 
 		case "window-change":
@@ -294,7 +344,16 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 
 		case "shell":
 			req.Reply(true, nil)
-			exitCode := s.execInContainer(ctx, ch, nil, envVars, winSize, &ptmx)
+			pid, err := s.containerPID()
+			if err != nil {
+				log.Printf("SSH: failed to resolve container PID: %v", err)
+				fmt.Fprintf(ch, "failed to resolve container PID: %v\r\n", err)
+				sendExitStatus(ch, 1)
+				return
+			}
+			shell := lookupShellInContainer(pid)
+			env := s.buildEnv(shell, term, envVars)
+			exitCode := s.execInContainer(ctx, ch, pid, nil, shell, env, winSize, &ptmx)
 			sendExitStatus(ch, exitCode)
 			return
 
@@ -305,8 +364,17 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 				continue
 			}
 			req.Reply(true, nil)
+			pid, err := s.containerPID()
+			if err != nil {
+				log.Printf("SSH: failed to resolve container PID: %v", err)
+				fmt.Fprintf(ch, "failed to resolve container PID: %v\r\n", err)
+				sendExitStatus(ch, 1)
+				return
+			}
+			shell := lookupShellInContainer(pid)
+			env := s.buildEnv(shell, term, envVars)
 			cmdArgs := []string{"/bin/sh", "-c", e.Command}
-			exitCode := s.execInContainer(ctx, ch, cmdArgs, envVars, winSize, &ptmx)
+			exitCode := s.execInContainer(ctx, ch, pid, cmdArgs, shell, env, winSize, &ptmx)
 			sendExitStatus(ch, exitCode)
 			return
 
@@ -318,29 +386,36 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 	}
 }
 
-// execInContainer runs a command inside the container's namespaces via
-// nsenter. If cmdArgs is nil, it runs an interactive login shell.
-// Returns the process exit code.
-func (s *sshServer) execInContainer(ctx context.Context, ch gossh.Channel, cmdArgs []string, envVars []string, winSize *pty.Winsize, ptmx **os.File) int {
-	pid, err := s.containerPID()
-	if err != nil {
-		log.Printf("SSH: failed to resolve container PID: %v", err)
-		fmt.Fprintf(ch, "failed to resolve container PID: %v\r\n", err)
-		return 1
+// buildEnv constructs the full environment for the container process.
+// Base env (HOME, USER, etc.) is set first, then TERM from pty-req,
+// then client-sent env vars (which can override base values).
+func (s *sshServer) buildEnv(shell, term string, clientEnv []string) []string {
+	env := baseEnvForRoot(shell)
+	if term != "" {
+		env = append(env, "TERM="+term)
 	}
+	env = append(env, clientEnv...)
+	return env
+}
+
+// execInContainer runs a command inside the container's namespaces via
+// nsenter. If cmdArgs is nil, it runs an interactive login shell using
+// the given shell path with -l. Returns the process exit code.
+func (s *sshServer) execInContainer(ctx context.Context, ch gossh.Channel, pid int, cmdArgs []string, shell string, envVars []string, winSize *pty.Winsize, ptmx **os.File) int {
 	args := []string{
 		"-t", strconv.Itoa(pid),
 		"-m", "-u", "-i", "-n", "-p", "-C", "-F",
 		"--",
 	}
 	if cmdArgs == nil {
-		args = append(args, "/bin/sh")
+		args = append(args, shell, "-l")
 	} else {
 		args = append(args, cmdArgs...)
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	cmd.Env = envVars
+	cmd.Dir = "/root"
 
 	if winSize != nil {
 		// Allocate a PTY.
