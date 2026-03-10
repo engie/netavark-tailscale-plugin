@@ -103,8 +103,9 @@ func TestParseEnvConfig(t *testing.T) {
 	if cfg.StateDir != "/tmp/ts4nsnet-test" {
 		t.Errorf("StateDir = %q, want %q", cfg.StateDir, "/tmp/ts4nsnet-test")
 	}
-	// TS_SSH_ALLOW parses into SSHAllow.
+	// TS_SSH_ALLOW parses into SSHAllow. TS_PIDFILE is required when SSH is enabled.
 	t.Setenv("TS_SSH_ALLOW", "alice@example.com:root,bob@example.com:dave")
+	t.Setenv("TS_PIDFILE", "/run/user/1000/test.pid")
 	cfg, err = parseEnvConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

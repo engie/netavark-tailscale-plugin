@@ -89,12 +89,13 @@ func TestContainerPID(t *testing.T) {
 	myNS := fmt.Sprintf("/proc/%d/ns/net", myPID)
 
 	t.Run("pidfile with matching netns", func(t *testing.T) {
-		pidfile := filepath.Join(t.TempDir(), "test.pid")
+		dir := t.TempDir()
+		pidfile := filepath.Join(dir, "test.pid")
 		if err := os.WriteFile(pidfile, []byte(fmt.Sprintf("%d\n", myPID)), 0644); err != nil {
 			t.Fatal(err)
 		}
 		s := &sshServer{nsPath: myNS, pidfilePath: pidfile}
-		got, err := s.containerPID()
+		got, err := s.containerPID("test")
 		if err != nil {
 			t.Fatalf("containerPID() error = %v", err)
 		}
@@ -105,32 +106,136 @@ func TestContainerPID(t *testing.T) {
 
 	t.Run("missing pidfilePath errors", func(t *testing.T) {
 		s := &sshServer{nsPath: myNS}
-		_, err := s.containerPID()
+		_, err := s.containerPID("test")
 		if err == nil {
 			t.Error("containerPID() = nil, want error for missing pidfilePath")
 		}
 	})
 
 	t.Run("missing pidfile errors", func(t *testing.T) {
-		s := &sshServer{nsPath: myNS, pidfilePath: "/tmp/nonexistent-pidfile"}
-		_, err := s.containerPID()
+		s := &sshServer{nsPath: myNS, pidfilePath: "/tmp/nonexistent-pidfile/x.pid"}
+		_, err := s.containerPID("x")
 		if err == nil {
-			t.Error("containerPID() = nil, want error for missing pidfile")
+			t.Error("containerPID() = nil, want error for missing pidfile directory")
 		}
 	})
 
 	t.Run("netns mismatch errors", func(t *testing.T) {
 		// PID 1 (init) is almost certainly in a different netns than us
-		pidfile := filepath.Join(t.TempDir(), "test.pid")
+		dir := t.TempDir()
+		pidfile := filepath.Join(dir, "test.pid")
 		if err := os.WriteFile(pidfile, []byte("1\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 		s := &sshServer{nsPath: myNS, pidfilePath: pidfile}
-		_, err := s.containerPID()
+		_, err := s.containerPID("test")
 		// This may error with permission denied (reading /proc/1/ns/net)
-		// or netns mismatch — either way it should error.
+		// or netns mismatch — either way it should error (no containers found
+		// or container not found).
 		if err == nil {
 			t.Error("containerPID() = nil, want error for netns mismatch")
+		}
+	})
+
+	t.Run("wrong container name errors", func(t *testing.T) {
+		dir := t.TempDir()
+		pidfile := filepath.Join(dir, "web.pid")
+		if err := os.WriteFile(pidfile, []byte(fmt.Sprintf("%d\n", myPID)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		s := &sshServer{nsPath: myNS, pidfilePath: pidfile}
+		_, err := s.containerPID("api")
+		if err == nil {
+			t.Error("containerPID(api) = nil, want error for wrong name")
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Errorf("error should mention 'not found', got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "web") {
+			t.Errorf("error should list available container 'web', got: %v", err)
+		}
+	})
+}
+
+func TestDiscoverContainers(t *testing.T) {
+	myPID := os.Getpid()
+	myNS := fmt.Sprintf("/proc/%d/ns/net", myPID)
+
+	t.Run("discovers multiple pidfiles in same netns", func(t *testing.T) {
+		dir := t.TempDir()
+		// Write two pidfiles pointing to our own PID (same netns).
+		for _, name := range []string{"web.pid", "api.pid"} {
+			path := filepath.Join(dir, name)
+			if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", myPID)), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s := &sshServer{nsPath: myNS, pidfilePath: filepath.Join(dir, "web.pid")}
+		got, err := s.discoverContainers()
+		if err != nil {
+			t.Fatalf("discoverContainers() error = %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("discoverContainers() returned %d containers, want 2", len(got))
+		}
+		if got["web"] != myPID {
+			t.Errorf("web PID = %d, want %d", got["web"], myPID)
+		}
+		if got["api"] != myPID {
+			t.Errorf("api PID = %d, want %d", got["api"], myPID)
+		}
+	})
+
+	t.Run("skips non-pid files", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "web.pid"), []byte(fmt.Sprintf("%d\n", myPID)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("not a pid"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		s := &sshServer{nsPath: myNS, pidfilePath: filepath.Join(dir, "web.pid")}
+		got, err := s.discoverContainers()
+		if err != nil {
+			t.Fatalf("discoverContainers() error = %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("discoverContainers() returned %d containers, want 1", len(got))
+		}
+	})
+
+	t.Run("skips pidfiles with wrong netns", func(t *testing.T) {
+		dir := t.TempDir()
+		// Our PID (same netns).
+		if err := os.WriteFile(filepath.Join(dir, "web.pid"), []byte(fmt.Sprintf("%d\n", myPID)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// PID 1 (different netns or unreadable).
+		if err := os.WriteFile(filepath.Join(dir, "other.pid"), []byte("1\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		s := &sshServer{nsPath: myNS, pidfilePath: filepath.Join(dir, "web.pid")}
+		got, err := s.discoverContainers()
+		if err != nil {
+			t.Fatalf("discoverContainers() error = %v", err)
+		}
+		if _, ok := got["other"]; ok {
+			t.Error("discoverContainers() should not include 'other' (wrong netns)")
+		}
+		if len(got) != 1 {
+			t.Fatalf("discoverContainers() returned %d containers, want 1", len(got))
+		}
+	})
+
+	t.Run("empty directory", func(t *testing.T) {
+		dir := t.TempDir()
+		s := &sshServer{nsPath: myNS, pidfilePath: filepath.Join(dir, "x.pid")}
+		got, err := s.discoverContainers()
+		if err != nil {
+			t.Fatalf("discoverContainers() error = %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("discoverContainers() returned %d containers, want 0", len(got))
 		}
 	})
 }

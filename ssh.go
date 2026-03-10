@@ -288,20 +288,59 @@ func validatePIDNetNS(pid int, nsPath string) error {
 	return nil
 }
 
-// containerPID resolves the container init PID from the pidfile and
-// validates it is in the expected network namespace.
-func (s *sshServer) containerPID() (int, error) {
+// discoverContainers scans the directory containing pidfilePath for *.pid
+// files, reads each PID, and returns those sharing our network namespace.
+// The map keys are pidfile basenames without the .pid extension.
+func (s *sshServer) discoverContainers() (map[string]int, error) {
+	if s.pidfilePath == "" {
+		return nil, fmt.Errorf("TS_PIDFILE not set; required for SSH container PID resolution")
+	}
+	dir := filepath.Dir(s.pidfilePath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("reading pidfile directory %s: %w", dir, err)
+	}
+	result := make(map[string]int)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".pid") {
+			continue
+		}
+		pidPath := filepath.Join(dir, e.Name())
+		pid, err := readPidfile(pidPath)
+		if err != nil {
+			continue // stale or unreadable pidfile
+		}
+		if err := validatePIDNetNS(pid, s.nsPath); err != nil {
+			continue // different netns, not part of this pod
+		}
+		name := strings.TrimSuffix(e.Name(), ".pid")
+		result[name] = pid
+	}
+	return result, nil
+}
+
+// containerPID resolves the container init PID for the given container name
+// (SSH username). It discovers all containers sharing our network namespace
+// by scanning pidfiles, then looks up the requested name.
+func (s *sshServer) containerPID(name string) (int, error) {
 	if s.pidfilePath == "" {
 		return 0, fmt.Errorf("TS_PIDFILE not set; required for SSH container PID resolution")
 	}
-	pid, err := readPidfile(s.pidfilePath)
+	containers, err := s.discoverContainers()
 	if err != nil {
 		return 0, err
 	}
-	if err := validatePIDNetNS(pid, s.nsPath); err != nil {
-		return 0, err
+	if len(containers) == 0 {
+		return 0, fmt.Errorf("no containers found sharing network namespace")
 	}
-	return pid, nil
+	if pid, ok := containers[name]; ok {
+		return pid, nil
+	}
+	available := make([]string, 0, len(containers))
+	for k := range containers {
+		available = append(available, k)
+	}
+	return 0, fmt.Errorf("container %q not found; available: %s", name, strings.Join(available, ", "))
 }
 
 // run starts the SSH server, listening on :22 of the tsnet interface.
@@ -366,7 +405,9 @@ func (s *sshServer) handleConn(ctx context.Context, nc net.Conn) {
 		return
 	}
 
-	log.Printf("SSH session from %s (%s) as %s", peerLogin, peerNode, localUser)
+	// The SSH username selects which container to enter (pidfile basename).
+	containerName := sconn.User()
+	log.Printf("SSH session from %s (%s) as %s in container %q", peerLogin, peerNode, localUser, containerName)
 
 	// Discard global requests (keepalives, etc).
 	go gossh.DiscardRequests(reqs)
@@ -381,14 +422,14 @@ func (s *sshServer) handleConn(ctx context.Context, nc net.Conn) {
 			log.Printf("SSH: failed to accept channel: %v", err)
 			continue
 		}
-		go s.handleSession(ctx, ch, reqs, localUser)
+		go s.handleSession(ctx, ch, reqs, localUser, containerName)
 	}
 }
 
 // handleSession processes requests on an SSH session channel: pty-req,
 // window-change, env, shell, and exec. Commands are run via nsenter into
 // the container's namespaces as localUser.
-func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-chan *gossh.Request, localUser string) {
+func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-chan *gossh.Request, localUser string, containerName string) {
 	defer ch.Close()
 
 	var (
@@ -440,7 +481,7 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 
 		case "shell":
 			req.Reply(true, nil)
-			pid, err := s.containerPID()
+			pid, err := s.containerPID(containerName)
 			if err != nil {
 				log.Printf("SSH: failed to resolve container PID: %v", err)
 				fmt.Fprintf(ch, "failed to resolve container PID: %v\r\n", err)
@@ -466,7 +507,7 @@ func (s *sshServer) handleSession(ctx context.Context, ch gossh.Channel, reqs <-
 				continue
 			}
 			req.Reply(true, nil)
-			pid, err := s.containerPID()
+			pid, err := s.containerPID(containerName)
 			if err != nil {
 				log.Printf("SSH: failed to resolve container PID: %v", err)
 				fmt.Fprintf(ch, "failed to resolve container PID: %v\r\n", err)
