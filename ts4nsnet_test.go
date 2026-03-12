@@ -7,8 +7,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"flag"
 	"io"
 	"net/http/httptest"
 	"net/netip"
@@ -29,155 +29,7 @@ import (
 	"tailscale.com/types/logger"
 )
 
-// --- Layer 1: Unit tests (no root, no network) ---
-
-func TestResolveNSPath(t *testing.T) {
-	tests := []struct {
-		nsArg     string
-		netnsType string
-		want      string
-		wantErr   bool
-	}{
-		{"/run/netns/test", "path", "/run/netns/test", false},
-		{"12345", "pid", "/proc/12345/ns/net", false},
-		{"/some/path", "path", "/some/path", false},
-		{"1", "", "/proc/1/ns/net", false},
-		{"../../etc", "pid", "", true},
-		{"notanumber", "", "", true},
-		{"12345", "paht", "", true},
-		{"12345", "unknown", "", true},
-	}
-	for _, tt := range tests {
-		got, err := resolveNSPath(tt.nsArg, tt.netnsType)
-		if (err != nil) != tt.wantErr {
-			t.Errorf("resolveNSPath(%q, %q) error = %v, wantErr %v", tt.nsArg, tt.netnsType, err, tt.wantErr)
-			continue
-		}
-		if got != tt.want {
-			t.Errorf("resolveNSPath(%q, %q) = %q, want %q", tt.nsArg, tt.netnsType, got, tt.want)
-		}
-	}
-}
-
-func TestParseEnvConfig(t *testing.T) {
-	// Missing authkey.
-	t.Setenv("TS_AUTHKEY", "")
-	t.Setenv("TS_HOSTNAME", "test")
-	t.Setenv("TS_EXIT_NODE", "")
-	t.Setenv("TS_CONTROL_URL", "")
-	_, err := parseEnvConfig()
-	if err == nil {
-		t.Fatal("expected error for missing TS_AUTHKEY")
-	}
-
-	// Missing hostname.
-	t.Setenv("TS_AUTHKEY", "tskey-auth-test")
-	t.Setenv("TS_HOSTNAME", "")
-	_, err = parseEnvConfig()
-	if err == nil {
-		t.Fatal("expected error for missing TS_HOSTNAME")
-	}
-
-	// Valid config.
-	t.Setenv("TS_AUTHKEY", "tskey-auth-test")
-	t.Setenv("TS_HOSTNAME", "myhost")
-	t.Setenv("TS_EXIT_NODE", "100.64.1.1")
-	t.Setenv("TS_CONTROL_URL", "https://control.example.com")
-	t.Setenv("TS_STATE_DIR", "/tmp/ts4nsnet-test")
-	cfg, err := parseEnvConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.AuthKey != "tskey-auth-test" {
-		t.Errorf("AuthKey = %q, want %q", cfg.AuthKey, "tskey-auth-test")
-	}
-	if cfg.Hostname != "myhost" {
-		t.Errorf("Hostname = %q, want %q", cfg.Hostname, "myhost")
-	}
-	if cfg.ExitNode != "100.64.1.1" {
-		t.Errorf("ExitNode = %q, want %q", cfg.ExitNode, "100.64.1.1")
-	}
-	if cfg.ControlURL != "https://control.example.com" {
-		t.Errorf("ControlURL = %q, want %q", cfg.ControlURL, "https://control.example.com")
-	}
-	if cfg.StateDir != "/tmp/ts4nsnet-test" {
-		t.Errorf("StateDir = %q, want %q", cfg.StateDir, "/tmp/ts4nsnet-test")
-	}
-	// TS_SSH_ALLOW parses into SSHAllow. TS_PIDFILE is required when SSH is enabled.
-	t.Setenv("TS_SSH_ALLOW", "alice@example.com:root,bob@example.com:dave")
-	t.Setenv("TS_PIDFILE", "/run/user/1000/test.pid")
-	cfg, err = parseEnvConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(cfg.SSHAllow) != 2 || cfg.SSHAllow["alice@example.com"] != "root" || cfg.SSHAllow["bob@example.com"] != "dave" {
-		t.Errorf("SSHAllow = %v, want map[alice@example.com:root bob@example.com:dave]", cfg.SSHAllow)
-	}
-
-	// TS_SSH_ALLOW empty means SSH disabled.
-	t.Setenv("TS_SSH_ALLOW", "")
-	cfg, err = parseEnvConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(cfg.SSHAllow) != 0 {
-		t.Errorf("SSHAllow = %v, want empty", cfg.SSHAllow)
-	}
-
-	// TS_SSH_ALLOW invalid format returns error.
-	t.Setenv("TS_SSH_ALLOW", "alice@example.com")
-	_, err = parseEnvConfig()
-	if err == nil {
-		t.Error("expected error for TS_SSH_ALLOW without :user suffix")
-	}
-	t.Setenv("TS_SSH_ALLOW", "")
-
-	// StateDir defaults to empty when not set.
-	t.Setenv("TS_STATE_DIR", "")
-	cfg, err = parseEnvConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.StateDir != "" {
-		t.Errorf("StateDir = %q, want empty", cfg.StateDir)
-	}
-
-	// Invalid hostnames.
-	for _, bad := range []string{
-		"../etc/passwd",
-		"-leading-hyphen",
-		"trailing-hyphen-",
-		"has spaces",
-		"UPPERCASE",
-		"has.dots",
-		"has/slash",
-		"",
-	} {
-		t.Setenv("TS_HOSTNAME", bad)
-		if bad == "" {
-			// Empty hostname is caught by the earlier check.
-			continue
-		}
-		_, err = parseEnvConfig()
-		if err == nil {
-			t.Errorf("expected error for hostname %q, got nil", bad)
-		}
-	}
-
-	// Valid hostnames.
-	for _, good := range []string{
-		"a",
-		"myhost",
-		"my-container-1",
-		"x" + string(make([]byte, 0)), // single char
-	} {
-		t.Setenv("TS_HOSTNAME", good)
-		_, err = parseEnvConfig()
-		if err != nil {
-			t.Errorf("unexpected error for hostname %q: %v", good, err)
-		}
-	}
-}
+// --- Tier 1: Unit tests (no root, no network) ---
 
 func TestValidateMTU(t *testing.T) {
 	tests := []struct {
@@ -232,57 +84,284 @@ func TestFdTUNCloseEvents(t *testing.T) {
 	}
 }
 
-func TestIgnoredFlags(t *testing.T) {
-	args := []string{
-		"-c",
-		"-r", "3",
-		"-e", "4",
-		"--mtu=1500",
-		"--netns-type=path",
-		"--cidr=10.0.2.0/24",
-		"--disable-host-loopback",
-		"--enable-sandbox",
-		"--enable-seccomp",
-		"--enable-ipv6",
-		"--api-socket=/tmp/test.sock",
-		"/run/netns/test",
-		"tap0",
+// --- Plugin JSON tests ---
+
+func TestPluginJSON(t *testing.T) {
+	t.Run("PluginInfo round-trip", func(t *testing.T) {
+		info := PluginInfo{Version: "0.1.0", APIVersion: "1.0.0"}
+		data, err := json.Marshal(info)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var got PluginInfo
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got != info {
+			t.Errorf("round-trip: got %+v, want %+v", got, info)
+		}
+	})
+
+	t.Run("NetworkPluginExec decode", func(t *testing.T) {
+		input := `{
+			"container_id": "abc123",
+			"container_name": "nginx-demo",
+			"network": {
+				"name": "tailscale-net",
+				"id": "def456",
+				"driver": "netavark-tailscale-plugin",
+				"dns_enabled": false,
+				"internal": false,
+				"ipv6_enabled": false,
+				"options": {"control_url": "https://control.example.com"}
+			},
+			"network_options": {
+				"interface_name": "eth0",
+				"options": {"ts_hostname": "nginx-demo"}
+			}
+		}`
+		var exec NetworkPluginExec
+		if err := json.Unmarshal([]byte(input), &exec); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if exec.ContainerID != "abc123" {
+			t.Errorf("ContainerID = %q, want %q", exec.ContainerID, "abc123")
+		}
+		if exec.Network.Options["control_url"] != "https://control.example.com" {
+			t.Errorf("network option control_url = %q", exec.Network.Options["control_url"])
+		}
+		if exec.NetworkOptions.Options["ts_hostname"] != "nginx-demo" {
+			t.Errorf("per-container option ts_hostname = %q", exec.NetworkOptions.Options["ts_hostname"])
+		}
+	})
+
+	t.Run("StatusBlock encode", func(t *testing.T) {
+		status := StatusBlock{
+			DNSServerIPs:     []string{"100.100.100.100"},
+			DNSSearchDomains: []string{},
+			Interfaces: map[string]NetInterface{
+				"tailscale0": {
+					MacAddress: "02:00:64:40:00:01",
+					Subnets: []NetAddress{
+						{IPNet: "100.64.0.1/32"},
+					},
+				},
+			},
+		}
+		data, err := json.Marshal(status)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		// Verify it round-trips.
+		var got StatusBlock
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(got.Interfaces) != 1 {
+			t.Errorf("expected 1 interface, got %d", len(got.Interfaces))
+		}
+		if iface, ok := got.Interfaces["tailscale0"]; !ok {
+			t.Error("missing tailscale0 interface")
+		} else if len(iface.Subnets) != 1 || iface.Subnets[0].IPNet != "100.64.0.1/32" {
+			t.Errorf("unexpected subnets: %+v", iface.Subnets)
+		}
+	})
+}
+
+func TestStatusBlock(t *testing.T) {
+	ready := &DaemonReady{
+		IPv4: "100.64.0.1",
+		IPv6: "fd7a:115c:a1e0::1",
+		MAC:  "02:00:64:40:00:01",
+	}
+	status := buildStatusBlock(ready)
+
+	if len(status.DNSServerIPs) != 1 || status.DNSServerIPs[0] != "100.100.100.100" {
+		t.Errorf("DNSServerIPs = %v, want [100.100.100.100]", status.DNSServerIPs)
 	}
 
-	fs := newTestFlagSet()
-	if err := fs.Parse(args); err != nil {
-		t.Fatalf("flag parsing failed: %v", err)
+	iface, ok := status.Interfaces["tailscale0"]
+	if !ok {
+		t.Fatal("missing tailscale0 interface")
 	}
-	positional := fs.Args()
-	if len(positional) != 2 {
-		t.Fatalf("expected 2 positional args, got %d: %v", len(positional), positional)
+	if iface.MacAddress != "02:00:64:40:00:01" {
+		t.Errorf("MAC = %q", iface.MacAddress)
 	}
-	if positional[0] != "/run/netns/test" {
-		t.Errorf("nsPath = %q, want /run/netns/test", positional[0])
+	if len(iface.Subnets) != 2 {
+		t.Fatalf("expected 2 subnets, got %d", len(iface.Subnets))
 	}
-	if positional[1] != "tap0" {
-		t.Errorf("tunName = %q, want tap0", positional[1])
+	if iface.Subnets[0].IPNet != "100.64.0.1/32" {
+		t.Errorf("IPv4 subnet = %q", iface.Subnets[0].IPNet)
+	}
+	if iface.Subnets[1].IPNet != "fd7a:115c:a1e0::1/128" {
+		t.Errorf("IPv6 subnet = %q", iface.Subnets[1].IPNet)
 	}
 }
 
-// newTestFlagSet creates a flag.FlagSet with the same flags as main().
-func newTestFlagSet() *flag.FlagSet {
-	fs := flag.NewFlagSet("ts4nsnet-test", flag.ContinueOnError)
-	fs.Bool("c", false, "configure interface")
-	fs.Int("r", -1, "ready fd")
-	fs.Int("e", -1, "exit fd")
-	fs.Int("mtu", 1500, "MTU")
-	fs.String("netns-type", "path", "namespace type")
-	fs.String("cidr", "", "ignored")
-	fs.Bool("disable-host-loopback", false, "ignored")
-	fs.Bool("enable-sandbox", false, "ignored")
-	fs.Bool("enable-seccomp", false, "ignored")
-	fs.Bool("enable-ipv6", false, "ignored")
-	fs.String("api-socket", "", "ignored")
-	return fs
+func TestConfigMerge(t *testing.T) {
+	t.Run("env vars override options", func(t *testing.T) {
+		t.Setenv("TS_AUTHKEY", "tskey-from-env")
+		t.Setenv("TS_HOSTNAME", "env-host")
+		t.Setenv("TS_CONTROL_URL", "")
+		t.Setenv("TS_EXIT_NODE", "")
+		t.Setenv("TS_SSH_ALLOW", "")
+		t.Setenv("TS_PIDFILE", "")
+		t.Setenv("TS_SSH_ACCEPT_ENV", "")
+
+		input := &NetworkPluginExec{
+			ContainerID:   "abc123",
+			ContainerName: "test-ctr",
+			Network: Network{
+				Options: map[string]string{
+					"hostname":    "net-host",
+					"control_url": "https://net-control.example.com",
+				},
+			},
+			NetworkOptions: PerNetworkOptions{
+				Options: map[string]string{
+					"ts_hostname": "ctr-host",
+				},
+			},
+		}
+
+		cfg, err := buildDaemonConfig("/run/netns/test", input)
+		if err != nil {
+			t.Fatalf("buildDaemonConfig: %v", err)
+		}
+		// Env TS_HOSTNAME overrides per-container ts_hostname which overrides network hostname.
+		if cfg.Hostname != "env-host" {
+			t.Errorf("Hostname = %q, want %q", cfg.Hostname, "env-host")
+		}
+		if cfg.AuthKey != "tskey-from-env" {
+			t.Errorf("AuthKey = %q, want %q", cfg.AuthKey, "tskey-from-env")
+		}
+		// ControlURL from network option (env is empty).
+		if cfg.ControlURL != "https://net-control.example.com" {
+			t.Errorf("ControlURL = %q, want %q", cfg.ControlURL, "https://net-control.example.com")
+		}
+	})
+
+	t.Run("per-container overrides network", func(t *testing.T) {
+		t.Setenv("TS_AUTHKEY", "tskey-test")
+		t.Setenv("TS_HOSTNAME", "")
+		t.Setenv("TS_CONTROL_URL", "")
+		t.Setenv("TS_EXIT_NODE", "")
+		t.Setenv("TS_SSH_ALLOW", "")
+		t.Setenv("TS_PIDFILE", "")
+		t.Setenv("TS_SSH_ACCEPT_ENV", "")
+
+		input := &NetworkPluginExec{
+			ContainerID:   "abc123",
+			ContainerName: "test-ctr",
+			Network: Network{
+				Options: map[string]string{
+					"hostname": "net-host",
+				},
+			},
+			NetworkOptions: PerNetworkOptions{
+				Options: map[string]string{
+					"ts_hostname": "ctr-host",
+				},
+			},
+		}
+
+		cfg, err := buildDaemonConfig("/run/netns/test", input)
+		if err != nil {
+			t.Fatalf("buildDaemonConfig: %v", err)
+		}
+		if cfg.Hostname != "ctr-host" {
+			t.Errorf("Hostname = %q, want %q", cfg.Hostname, "ctr-host")
+		}
+	})
+
+	t.Run("defaults to container name", func(t *testing.T) {
+		t.Setenv("TS_AUTHKEY", "tskey-test")
+		t.Setenv("TS_HOSTNAME", "")
+		t.Setenv("TS_CONTROL_URL", "")
+		t.Setenv("TS_EXIT_NODE", "")
+		t.Setenv("TS_SSH_ALLOW", "")
+		t.Setenv("TS_PIDFILE", "")
+		t.Setenv("TS_SSH_ACCEPT_ENV", "")
+
+		input := &NetworkPluginExec{
+			ContainerID:   "abc123",
+			ContainerName: "my-container",
+		}
+
+		cfg, err := buildDaemonConfig("/run/netns/test", input)
+		if err != nil {
+			t.Fatalf("buildDaemonConfig: %v", err)
+		}
+		if cfg.Hostname != "my-container" {
+			t.Errorf("Hostname = %q, want %q", cfg.Hostname, "my-container")
+		}
+	})
+
+	t.Run("missing authkey errors", func(t *testing.T) {
+		t.Setenv("TS_AUTHKEY", "")
+		t.Setenv("TS_HOSTNAME", "")
+		t.Setenv("TS_CONTROL_URL", "")
+		t.Setenv("TS_EXIT_NODE", "")
+		t.Setenv("TS_SSH_ALLOW", "")
+		t.Setenv("TS_PIDFILE", "")
+		t.Setenv("TS_SSH_ACCEPT_ENV", "")
+
+		input := &NetworkPluginExec{
+			ContainerID:   "abc123",
+			ContainerName: "test-ctr",
+		}
+
+		_, err := buildDaemonConfig("/run/netns/test", input)
+		if err == nil {
+			t.Fatal("expected error for missing auth key")
+		}
+		if !strings.Contains(err.Error(), "TS_AUTHKEY") {
+			t.Errorf("error should mention TS_AUTHKEY, got: %v", err)
+		}
+	})
+
+	t.Run("invalid hostname errors", func(t *testing.T) {
+		t.Setenv("TS_AUTHKEY", "tskey-test")
+		t.Setenv("TS_HOSTNAME", "UPPERCASE")
+		t.Setenv("TS_CONTROL_URL", "")
+		t.Setenv("TS_EXIT_NODE", "")
+		t.Setenv("TS_SSH_ALLOW", "")
+		t.Setenv("TS_PIDFILE", "")
+		t.Setenv("TS_SSH_ACCEPT_ENV", "")
+
+		input := &NetworkPluginExec{
+			ContainerID:   "abc123",
+			ContainerName: "test-ctr",
+		}
+
+		_, err := buildDaemonConfig("/run/netns/test", input)
+		if err == nil {
+			t.Fatal("expected error for invalid hostname")
+		}
+	})
+
+	t.Run("ssh without pidfile errors", func(t *testing.T) {
+		t.Setenv("TS_AUTHKEY", "tskey-test")
+		t.Setenv("TS_HOSTNAME", "test-host")
+		t.Setenv("TS_CONTROL_URL", "")
+		t.Setenv("TS_EXIT_NODE", "")
+		t.Setenv("TS_SSH_ALLOW", "*:root")
+		t.Setenv("TS_PIDFILE", "")
+		t.Setenv("TS_SSH_ACCEPT_ENV", "")
+
+		input := &NetworkPluginExec{
+			ContainerID:   "abc123",
+			ContainerName: "test-ctr",
+		}
+
+		_, err := buildDaemonConfig("/run/netns/test", input)
+		if err == nil {
+			t.Fatal("expected error for SSH without pidfile")
+		}
+	})
 }
 
-// --- Layer 2: tsnet integration tests (no root, fake control + chanTUN) ---
+// --- Tier 2: tsnet integration tests (no root, fake control + chanTUN) ---
 
 // chanTUN is a tun.Device backed by channels for packet I/O in tests.
 type chanTUN struct {
@@ -477,7 +556,7 @@ func TestExitNodeConfig(t *testing.T) {
 	}
 }
 
-// --- Layer 3: Namespace + TUN creation (requires root) ---
+// --- Tier 3: Namespace + TUN creation (requires root) ---
 
 func TestCreateTUNInNamespace(t *testing.T) {
 	if os.Getuid() != 0 {
@@ -563,7 +642,7 @@ func TestConfigureInterface(t *testing.T) {
 	}
 }
 
-// --- Layer 4: Full end-to-end (requires root) ---
+// --- Tier 4: Full end-to-end (requires root) ---
 
 func TestFullFlow(t *testing.T) {
 	if os.Getuid() != 0 {

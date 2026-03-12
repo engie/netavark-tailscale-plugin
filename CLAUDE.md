@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ts4nsnet is a drop-in replacement for slirp4netns that bridges rootless container traffic onto a Tailscale network (tailnet) via the `tsnet` library. It creates a TUN device inside a container's network namespace and makes containers appear as ephemeral Tailscale nodes. Designed for use with podman.
+netavark-tailscale-plugin is a netavark network plugin that bridges rootless container traffic onto a Tailscale network (tailnet) via the `tsnet` library. It creates a TUN device inside a container's network namespace and makes containers appear as ephemeral Tailscale nodes. Designed for use with podman.
+
+The binary operates in two modes:
+- **Plugin mode** (`info`, `create`, `setup`, `teardown`): short-lived netavark plugin protocol handlers (JSON stdin/stdout)
+- **Daemon mode** (`daemon`): long-running tsnet process, managed by systemd via `systemd-run --user`
 
 All source files are Linux-only (`//go:build linux`).
 
@@ -12,13 +16,13 @@ All source files are Linux-only (`//go:build linux`).
 
 ```bash
 # Build
-go build -o ts4nsnet .
+go build -o netavark-tailscale-plugin .
 
 # Lint
 go vet ./...
 
 # Tier 1: Unit tests (no root, no network)
-go test -run 'TestResolveNSPath|TestParseEnvConfig|TestValidateMTU|TestFdTUNCloseEvents|TestIgnoredFlags|TestReadPidfile|TestValidatePIDNetNS|TestContainerPID|TestSSHPayloadParsing|TestSSHHostKeyPersistence|TestParseSSHAllow|TestSSHAllowlist|TestAcceptEnvPair|TestMatchAcceptEnvPattern|TestParseAcceptEnv|TestIsAllowedEnv|TestParsePasswdUser|TestBaseEnvForUser|TestDiscoverContainers' -v ./...
+go test -run 'TestValidateMTU|TestFdTUNCloseEvents|TestPluginJSON|TestStatusBlock|TestConfigMerge|TestReadPidfile|TestValidatePIDNetNS|TestContainerPID|TestSSHPayloadParsing|TestSSHHostKeyPersistence|TestParseSSHAllow|TestSSHAllowlist|TestAcceptEnvPair|TestMatchAcceptEnvPattern|TestParseAcceptEnv|TestIsAllowedEnv|TestParsePasswdUser|TestBaseEnvForUser|TestDiscoverContainers' -v ./...
 
 # Tier 2: Integration tests (no root, fake control + chanTUN)
 go test -run 'TestTsnetConnectsToControl|TestTwoNodesCanCommunicate|TestExitNodeConfig|TestSSHServerConnects' -v ./...
@@ -37,25 +41,41 @@ CI runs only Tier 1 tests, `go vet`, and build.
 
 ## Architecture
 
-Four source files, single package `main`:
+Five source files, single package `main`:
 
-- **main.go** — Entry point, CLI flag parsing (slirp4netns-compatible), env config (`TS_AUTHKEY`, `TS_HOSTNAME`, `TS_EXIT_NODE`, `TS_CONTROL_URL`, `TS_STATE_DIR`), tsnet server lifecycle, ready/exit fd coordination with podman, signal handling.
+- **main.go** — Entry point, subcommand dispatch (`info`, `create`, `setup`, `teardown`, `daemon`).
+- **plugin.go** — Netavark plugin protocol: JSON types (Network, NetworkPluginExec, StatusBlock, etc.), plugin handlers, config merging (network options → per-container options → env vars), systemd-run invocation, readiness polling.
+- **daemon.go** — Long-running daemon: reads `config.json` from state dir, creates TUN, runs tsnet, configures interface, writes `ready.json`, handles signals.
 - **ssh.go** — SSH server on the tsnet interface. Identifies peers via WhoIs, checks the allowlist (`TS_SSH_ALLOW`), discovers containers via pidfile scanning, and runs commands inside containers via `nsenter`.
 - **netns.go** — Network namespace operations. `createTUNInNamespace()` uses a sacrificial goroutine pattern (LockOSThread + Setns, thread never returned) to create a TUN in the container's namespace. Interface configuration uses raw netlink/ioctl syscalls (no external dependencies).
 - **tun.go** — `fdTUN` struct implementing the `tun.Device` interface, wrapping the file descriptor from namespace creation for use by tsnet.
 
+### Plugin ↔ Daemon lifecycle
+
+```
+podman run --network tailscale-net ...
+  → netavark invokes: netavark-tailscale-plugin setup /run/netns/xxx < JSON
+     → plugin writes config.json to /run/ts4nsnet/<container-id>/
+     → plugin runs: systemd-run --user --unit=ts4nsnet-<short-id> ... daemon --state-dir=...
+     → daemon creates TUN, starts tsnet, configures interface
+     → daemon writes ready.json (IPs, MAC)
+     → plugin polls for ready.json, builds StatusBlock, returns JSON
+  → container stops
+  → netavark invokes: netavark-tailscale-plugin teardown /run/netns/xxx < JSON
+     → plugin runs: systemctl --user stop ts4nsnet-<short-id>
+     → plugin cleans up state dir
+```
+
+### Configuration flow
+
+Config merges three layers (later overrides earlier):
+1. **Network options** (`podman network create --opt key=value`)
+2. **Per-container options** (quadlet `NetworkOptions=key=value`)
+3. **Environment variables** (`TS_AUTHKEY`, `TS_HOSTNAME`, etc.)
+
 ### SSH container selection
 
-The SSH username field selects which container to enter. `discoverContainers()` scans `dirname(TS_PIDFILE)` for `*.pid` files, reads each PID, and filters to those sharing the network namespace (via `validatePIDNetNS`). The SSH username must match a pidfile basename (without `.pid`).
-
-**Single container:** `ssh nginx-demo@nginx-demo.tailnet` — the username `nginx-demo` matches `nginx-demo.pid` in the pidfile directory. There's only one container in the netns.
-
-**Pod (multiple containers):** In a podman pod, all containers share a network namespace. Each container writes a pidfile to the same `%t` directory (e.g. `/run/user/<uid>/webapp-web.pid`, `/run/user/<uid>/webapp-api.pid`). The SSH username selects the target:
-- `ssh webapp-web@webapp.tailnet` → enters the web container
-- `ssh webapp-api@webapp.tailnet` → enters the api container
-- `ssh wrong@webapp.tailnet` → error listing available containers
-
-The allowlist (`TS_SSH_ALLOW`) maps tailnet identity to the OS user inside the container (e.g. `alice@example.com:root`). Container selection (SSH username) and OS user (allowlist) are independent.
+The SSH username field selects which container to enter. `discoverContainers()` scans `dirname(pidfilePath)` for `*.pid` files, reads each PID, and filters to those sharing the network namespace (via `validatePIDNetNS`). The SSH username must match a pidfile basename (without `.pid`).
 
 ### Key pattern: Sacrificial goroutine
 

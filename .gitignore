@@ -1,2 +1,7 @@
 ts4nsnet
+netavark-tailscale-plugin
 test.key
+oauth.env
+.e2e-*/
+.e2e-tailmint
+.e2e-authkey.env
