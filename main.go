@@ -23,6 +23,15 @@ func main() {
 	log.SetFlags(0)
 	log.SetPrefix("netavark-tailscale-plugin: ")
 
+	// Refuse to run as root. The security model assumes rootless podman where
+	// user namespace isolation contains same-user bugs. Running as root
+	// escalates every path traversal, PID, and nsenter issue to host-root.
+	if os.Geteuid() == 0 && os.Getenv("UNSAFE_ALLOW_ROOT") == "" {
+		fmt.Fprintf(os.Stderr, "netavark-tailscale-plugin: refusing to run as root (rootless podman required)\n")
+		fmt.Fprintf(os.Stderr, "Set UNSAFE_ALLOW_ROOT=1 to override (for testing only).\n")
+		os.Exit(1)
+	}
+
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "usage: netavark-tailscale-plugin <info|create|setup|teardown|daemon> [args...]\n")
 		os.Exit(1)
