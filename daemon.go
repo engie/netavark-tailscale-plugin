@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/syslog"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -52,6 +53,12 @@ func cmdDaemon() error {
 }
 
 func runDaemon(cfg *DaemonConfig, stateDir string) error {
+	// Redirect logging to syslog/journald so logs survive after the
+	// plugin process exits and its stderr pipe closes.
+	if w, err := syslog.New(syslog.LOG_INFO|syslog.LOG_DAEMON, "ts4nsnet"); err == nil {
+		log.SetOutput(w)
+	}
+
 	// Clear sensitive data from process environment.
 	os.Unsetenv("TS_AUTHKEY")
 
