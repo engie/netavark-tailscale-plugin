@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/store/mem"
@@ -184,11 +185,26 @@ func runDaemon(cfg *DaemonConfig, stateDir string) error {
 	}
 	log.Printf("ready (state dir: %s)", stateDir)
 
-	// Wait for shutdown signal.
+	// Wait for shutdown signal or netns disappearance.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	// Monitor the network namespace — if the container is gone and teardown
+	// never ran, self-terminate to avoid orphaned Tailscale nodes.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if _, err := os.Stat(cfg.NetNSPath); err != nil {
+				log.Printf("network namespace %s gone, self-terminating", cfg.NetNSPath)
+				sigCh <- syscall.SIGTERM
+				return
+			}
+		}
+	}()
+
 	<-sigCh
-	log.Printf("received signal, shutting down")
+	log.Printf("shutting down")
 
 	srv.Close()
 	return nil
