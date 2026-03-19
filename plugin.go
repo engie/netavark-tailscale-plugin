@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -483,17 +482,11 @@ func readDaemonPID(stateDir string) (daemonPIDInfo, error) {
 	if err != nil {
 		return daemonPIDInfo{}, err
 	}
-	// Try JSON format first (new).
 	var info daemonPIDInfo
-	if err := json.Unmarshal(data, &info); err == nil && info.PID > 0 {
-		return info, nil
-	}
-	// Fall back to bare PID (old format, for compatibility during rollout).
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
+	if err := json.Unmarshal(data, &info); err != nil || info.PID <= 0 {
 		return daemonPIDInfo{}, fmt.Errorf("invalid daemon.pid content")
 	}
-	return daemonPIDInfo{PID: pid}, nil
+	return info, nil
 }
 
 // killDaemon reads the daemon PID info from the state dir, verifies the

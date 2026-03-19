@@ -125,18 +125,12 @@ func TestDaemonPIDRoundTrip(t *testing.T) {
 		}
 	})
 
-	t.Run("reads legacy bare PID format", func(t *testing.T) {
-		legacyDir := t.TempDir()
-		os.WriteFile(filepath.Join(legacyDir, "daemon.pid"), []byte("42\n"), 0600)
-		info, err := readDaemonPID(legacyDir)
-		if err != nil {
-			t.Fatalf("readDaemonPID(legacy) error = %v", err)
-		}
-		if info.PID != 42 {
-			t.Errorf("PID = %d, want 42", info.PID)
-		}
-		if info.Starttime != "" {
-			t.Errorf("Starttime = %q, want empty for legacy format", info.Starttime)
+	t.Run("rejects bare PID format", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "daemon.pid"), []byte("42\n"), 0600)
+		_, err := readDaemonPID(dir)
+		if err == nil {
+			t.Error("readDaemonPID(bare PID) = nil, want error")
 		}
 	})
 
