@@ -502,7 +502,7 @@ func startTestControl(t *testing.T) (controlURL string, control *testcontrol.Ser
 		DNSConfig: &tailcfg.DNSConfig{
 			Proxied: true,
 		},
-		MagicDNSDomain: "ts4nsnet-test.ts.net",
+		MagicDNSDomain: "netavark-tailscale-plugin-test.ts.net",
 		Logf:           t.Logf,
 	}
 	control.HTTPTestServer = httptest.NewUnstartedServer(control)
@@ -627,7 +627,7 @@ func TestCreateTUNInNamespace(t *testing.T) {
 		t.Skip("requires root for network namespace operations")
 	}
 
-	nsName := "ts4nsnet-test-tun"
+	nsName := "netavark-tailscale-plugin-test-tun"
 
 	if out, err := exec.Command("ip", "netns", "add", nsName).CombinedOutput(); err != nil {
 		t.Fatalf("ip netns add: %v: %s", err, out)
@@ -661,7 +661,7 @@ func TestConfigureInterface(t *testing.T) {
 		t.Skip("requires root for network namespace operations")
 	}
 
-	nsName := "ts4nsnet-test-cfg"
+	nsName := "netavark-tailscale-plugin-test-cfg"
 
 	if out, err := exec.Command("ip", "netns", "add", nsName).CombinedOutput(); err != nil {
 		t.Fatalf("ip netns add: %v: %s", err, out)
@@ -714,7 +714,7 @@ func TestFullFlow(t *testing.T) {
 	}
 
 	controlURL, _ := startTestControl(t)
-	nsName := "ts4nsnet-test-full"
+	nsName := "netavark-tailscale-plugin-test-full"
 
 	if out, err := exec.Command("ip", "netns", "add", nsName).CombinedOutput(); err != nil {
 		t.Fatalf("ip netns add: %v: %s", err, out)

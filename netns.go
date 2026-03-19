@@ -159,9 +159,9 @@ func configureWithNetlink(tunName string, ip4, ip6 netip.Addr, mtu int) error {
 
 	if ip6.IsValid() {
 		if err := addAddr6(tunName, ip6); err != nil {
-			fmt.Fprintf(os.Stderr, "ts4nsnet: warning: adding IPv6 address: %v\n", err)
+			fmt.Fprintf(os.Stderr, "netavark-tailscale-plugin: warning: adding IPv6 address: %v\n", err)
 		} else if err := addRoute6Default(tunName); err != nil {
-			fmt.Fprintf(os.Stderr, "ts4nsnet: warning: adding IPv6 default route: %v\n", err)
+			fmt.Fprintf(os.Stderr, "netavark-tailscale-plugin: warning: adding IPv6 default route: %v\n", err)
 		}
 	}
 

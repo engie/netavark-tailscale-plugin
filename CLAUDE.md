@@ -55,14 +55,14 @@ Five source files, single package `main`:
 ```
 podman run --network tailscale-net ...
   → netavark invokes: netavark-tailscale-plugin setup /run/netns/xxx < JSON
-     → plugin writes config.json to /run/ts4nsnet/<container-id>/
-     → plugin runs: systemd-run --user --unit=ts4nsnet-<short-id> ... daemon --state-dir=...
+     → plugin writes config.json to /run/netavark-tailscale-plugin/<container-id>/
+     → plugin runs: systemd-run --user --unit=netavark-tailscale-plugin-<short-id> ... daemon --state-dir=...
      → daemon creates TUN, starts tsnet, configures interface
      → daemon writes ready.json (IPs, MAC)
      → plugin polls for ready.json, builds StatusBlock, returns JSON
   → container stops
   → netavark invokes: netavark-tailscale-plugin teardown /run/netns/xxx < JSON
-     → plugin runs: systemctl --user stop ts4nsnet-<short-id>
+     → plugin runs: systemctl --user stop netavark-tailscale-plugin-<short-id>
      → plugin cleans up state dir
 ```
 

@@ -24,9 +24,9 @@ const (
 	apiVersion    = "1.0.0"
 
 	// defaultStateBaseDir is the fallback base directory for per-container daemon state.
-	// Overridden by $XDG_RUNTIME_DIR/ts4nsnet when available, which is
+	// Overridden by $XDG_RUNTIME_DIR/netavark-tailscale-plugin when available, which is
 	// required for rootless podman (the daemon needs to see the state dir).
-	defaultStateBaseDir = "/run/ts4nsnet"
+	defaultStateBaseDir = "/run/netavark-tailscale-plugin"
 
 	// readyTimeout is how long setup waits for the daemon to write ready.json.
 	readyTimeout = 60 * time.Second
@@ -145,10 +145,10 @@ type DaemonReady struct {
 var validHostname = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // stateBaseDir returns the base directory for daemon state.
-// Uses $XDG_RUNTIME_DIR/ts4nsnet in rootless mode, falling back to /run/ts4nsnet.
+// Uses $XDG_RUNTIME_DIR/netavark-tailscale-plugin in rootless mode, falling back to /run/netavark-tailscale-plugin.
 func stateBaseDir() string {
 	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
-		return filepath.Join(xdg, "ts4nsnet")
+		return filepath.Join(xdg, "netavark-tailscale-plugin")
 	}
 	return defaultStateBaseDir
 }

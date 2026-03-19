@@ -55,7 +55,7 @@ func cmdDaemon() error {
 func runDaemon(cfg *DaemonConfig, stateDir string) error {
 	// Redirect logging to syslog/journald so logs survive after the
 	// plugin process exits and its stderr pipe closes.
-	if w, err := syslog.New(syslog.LOG_INFO|syslog.LOG_DAEMON, "ts4nsnet"); err == nil {
+	if w, err := syslog.New(syslog.LOG_INFO|syslog.LOG_DAEMON, "netavark-tailscale-plugin"); err == nil {
 		log.SetOutput(w)
 	}
 

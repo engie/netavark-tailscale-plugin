@@ -221,7 +221,7 @@ if pgrep -f "$PLUGIN_NAME.*daemon" >/dev/null 2>&1; then
 fi
 
 # Verify state dir cleaned up.
-state_base="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ts4nsnet"
+state_base="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/netavark-tailscale-plugin"
 container_id=$(podman inspect "$CONTAINER_NAME" --format '{{.Id}}' 2>/dev/null || echo "")
 if [[ -n "$container_id" && -d "$state_base/$container_id" ]]; then
     fail "state dir still exists after teardown"

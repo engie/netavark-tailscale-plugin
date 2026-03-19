@@ -1,4 +1,4 @@
-module github.com/stephenwan-opal/ts4nsnet
+module github.com/engie/netavark-tailscale-plugin
 
 go 1.25.6
 

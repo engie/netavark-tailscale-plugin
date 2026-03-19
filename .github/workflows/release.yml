@@ -19,12 +19,12 @@ jobs:
           go-version: "1.25"
 
       - name: Build linux/amd64
-        run: GOOS=linux GOARCH=amd64 go build -o ts4nsnet-linux-amd64 .
+        run: GOOS=linux GOARCH=amd64 go build -o netavark-tailscale-plugin-linux-amd64 .
 
       - name: Build linux/arm64
-        run: GOOS=linux GOARCH=arm64 go build -o ts4nsnet-linux-arm64 .
+        run: GOOS=linux GOARCH=arm64 go build -o netavark-tailscale-plugin-linux-arm64 .
 
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" ts4nsnet-linux-amd64 ts4nsnet-linux-arm64 --generate-notes
+        run: gh release create "${{ github.ref_name }}" netavark-tailscale-plugin-linux-amd64 netavark-tailscale-plugin-linux-arm64 --generate-notes
