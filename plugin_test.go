@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/tailscale/wireguard-go/tun"
+	"tailscale.com/ipn"
 	"tailscale.com/ipn/store/mem"
 	"tailscale.com/net/netns"
 	"tailscale.com/tailcfg"
@@ -610,6 +611,56 @@ func TestExitNodeConfig(t *testing.T) {
 	if prefs.ExitNodeIP.IsValid() {
 		t.Fatalf("exit node IP should not be set initially, got %v", prefs.ExitNodeIP)
 	}
+}
+
+func TestExitNodePrefs(t *testing.T) {
+	t.Run("empty means no exit node", func(t *testing.T) {
+		mp, err := exitNodePrefs("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if mp != nil {
+			t.Fatalf("expected nil MaskedPrefs, got %+v", mp)
+		}
+	})
+
+	t.Run("literal IP pins the node", func(t *testing.T) {
+		mp, err := exitNodePrefs("100.78.174.92")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !mp.ExitNodeIPSet || mp.AutoExitNodeSet {
+			t.Fatalf("expected ExitNodeIPSet only, got ExitNodeIPSet=%t AutoExitNodeSet=%t", mp.ExitNodeIPSet, mp.AutoExitNodeSet)
+		}
+		if got := mp.ExitNodeIP; got != netip.MustParseAddr("100.78.174.92") {
+			t.Fatalf("ExitNodeIP = %v, want 100.78.174.92", got)
+		}
+		if mp.AutoExitNode.IsSet() {
+			t.Fatalf("AutoExitNode should be empty, got %q", mp.AutoExitNode)
+		}
+	})
+
+	t.Run("auto:any selects automatically", func(t *testing.T) {
+		mp, err := exitNodePrefs("auto:any")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !mp.AutoExitNodeSet || mp.ExitNodeIPSet {
+			t.Fatalf("expected AutoExitNodeSet only, got AutoExitNodeSet=%t ExitNodeIPSet=%t", mp.AutoExitNodeSet, mp.ExitNodeIPSet)
+		}
+		if mp.AutoExitNode != ipn.AnyExitNode {
+			t.Fatalf("AutoExitNode = %q, want %q", mp.AutoExitNode, ipn.AnyExitNode)
+		}
+		if mp.ExitNodeIP.IsValid() {
+			t.Fatalf("ExitNodeIP should be unset, got %v", mp.ExitNodeIP)
+		}
+	})
+
+	t.Run("garbage is rejected", func(t *testing.T) {
+		if _, err := exitNodePrefs("not-an-ip"); err == nil {
+			t.Fatal("expected error for non-IP, non-auto value")
+		}
+	})
 }
 
 // --- Tier 3: Namespace + TUN creation (requires root) ---
