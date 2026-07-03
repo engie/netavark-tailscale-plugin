@@ -52,7 +52,7 @@ Config merges three layers (later overrides earlier):
 |----------|----------|-------------|
 | `TS_AUTHKEY` | Yes | Tailscale auth key for the ephemeral node. Cleared from the process environment after reading. Use ephemeral, single-use auth keys. |
 | `TS_HOSTNAME` | Yes | Hostname to register on the tailnet |
-| `TS_EXIT_NODE` | No | IP address of an exit node to route traffic through |
+| `TS_EXIT_NODE` | No | Exit node to route traffic through: an exit-node IP (e.g. `100.64.0.1`), or `auto:any` to auto-select the best available exit node and re-pick if it goes offline |
 | `TS_CONTROL_URL` | No | Custom control server URL |
 
 **Note:** Tailscale enables [logtail](https://pkg.go.dev/tailscale.com/logtail)
@@ -162,7 +162,7 @@ options:
 |----------|--------|----------|-------------|
 | `TS_AUTHKEY` | — | Yes | Tailscale auth key (use ephemeral, single-use) |
 | `TS_HOSTNAME` | `hostname` | Yes | Node hostname on the tailnet |
-| `TS_EXIT_NODE` | `exit_node` | No | Exit node IP to route traffic through |
+| `TS_EXIT_NODE` | `exit_node` | No | Exit node to route traffic through: an exit-node IP, or `auto:any` to auto-select the best available exit node (mirrors `tailscale set --exit-node`) |
 | `TS_CONTROL_URL` | `control_url` | No | Custom Tailscale control server URL |
 | `TS_TLS_CERTS_DIR` | `tls_certs_dir` | No | Absolute directory where the daemon writes `cert.pem` + `key.pem` (Let's Encrypt via Tailscale) and refreshes them. Bind-mount it into the container so the app can terminate TLS itself. |
 
@@ -170,7 +170,7 @@ options:
 
 ```sh
 # Unit tests (no root required)
-go test -run 'TestValidateMTU|TestFdTUNCloseEvents|TestPluginJSON|TestStatusBlock|TestConfigMerge' -v ./...
+go test -run 'TestValidateMTU|TestFdTUNCloseEvents|TestPluginJSON|TestStatusBlock|TestConfigMerge|TestExitNodePrefs' -v ./...
 
 # Integration tests with fake control server (no root required)
 go test -run 'TestTsnetConnectsToControl|TestTwoNodesCanCommunicate|TestExitNodeConfig' -v ./...

@@ -159,21 +159,17 @@ func runDaemon(cfg *DaemonConfig, stateDir string) error {
 	}
 
 	// Set exit node if requested.
-	if cfg.ExitNode != "" {
-		exitIP, err := netip.ParseAddr(cfg.ExitNode)
-		if err != nil {
-			return fmt.Errorf("parsing exit_node %q: %v", cfg.ExitNode, err)
-		}
-		_, err = lc.EditPrefs(ctx, &ipn.MaskedPrefs{
-			Prefs: ipn.Prefs{
-				ExitNodeIP: exitIP,
-			},
-			ExitNodeIPSet: true,
-		})
-		if err != nil {
+	if mp, err := exitNodePrefs(cfg.ExitNode); err != nil {
+		return err
+	} else if mp != nil {
+		if _, err := lc.EditPrefs(ctx, mp); err != nil {
 			return fmt.Errorf("setting exit node: %v", err)
 		}
-		log.Printf("exit node set to %v", exitIP)
+		if mp.AutoExitNodeSet {
+			log.Printf("exit node set to auto:%s", mp.AutoExitNode)
+		} else {
+			log.Printf("exit node set to %v", mp.ExitNodeIP)
+		}
 	}
 
 	// Configure the interface inside the container namespace.
@@ -288,4 +284,34 @@ func runDaemon(cfg *DaemonConfig, stateDir string) error {
 
 	srv.Close()
 	return nil
+}
+
+// exitNodePrefs builds the MaskedPrefs needed to route container traffic
+// through an exit node, from a user-supplied TS_EXIT_NODE value. It accepts
+// either:
+//
+//   - a literal exit-node IP, e.g. "100.64.0.1", pinning that specific node; or
+//   - an auto-selection expression using Tailscale's "auto:" syntax, e.g.
+//     "auto:any", letting the backend pick the best available exit node and
+//     re-pick if it goes offline.
+//
+// This mirrors `tailscale set --exit-node=<ip|auto:any>`. An empty string
+// returns (nil, nil), meaning no exit node should be set.
+func exitNodePrefs(exitNode string) (*ipn.MaskedPrefs, error) {
+	if exitNode == "" {
+		return nil, nil
+	}
+	mp := &ipn.MaskedPrefs{}
+	if expr, isAuto := ipn.ParseAutoExitNodeString(exitNode); isAuto {
+		mp.Prefs.AutoExitNode = expr
+		mp.AutoExitNodeSet = true
+		return mp, nil
+	}
+	ip, err := netip.ParseAddr(exitNode)
+	if err != nil {
+		return nil, fmt.Errorf("parsing exit_node %q: %v", exitNode, err)
+	}
+	mp.Prefs.ExitNodeIP = ip
+	mp.ExitNodeIPSet = true
+	return mp, nil
 }
